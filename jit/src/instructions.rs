@@ -629,6 +629,23 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         res
     }
     */
+
+    /*
+    what this code translates to in python 
+    def pow(base, exponent) -> int: 
+        if exponent < 0:
+            return 0
+        result = 1
+    
+        while exponent > 0:
+            # If exponent is odd, multiply the result by base
+            if exponent & 1:
+                result *= base
+            # Square the base and halve the exponent
+            base *= base
+            exponent >>= 1  # Equivalent to exponent //= 2
+        return result
+    */ 
     fn compile_fpow(&mut self, a: Value, b: Value) -> Value {
         // Convert float exponent to integer and set up initial values
         let exp = self.builder.ins().fcvt_to_sint(types::I64, b);
