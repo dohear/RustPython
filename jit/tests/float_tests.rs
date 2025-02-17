@@ -295,3 +295,4 @@ fn test_float_lte() {
     assert_eq!(float_lte(f64::NAN, f64::NAN), Ok(false));
     assert_eq!(float_lte(f64::INFINITY, f64::NEG_INFINITY), Ok(false));
 }
+

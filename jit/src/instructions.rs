@@ -460,6 +460,11 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     (BinaryOperator::Xor, JitValue::Int(a), JitValue::Int(b)) => {
                         JitValue::Int(self.builder.ins().bxor(a, b))
                     }
+                    (BinaryOperator::Divide, JitValue::Int(a), JitValue::Int(b)) => {
+                        let a_float = self.builder.ins().fcvt_from_sint(types::F64, a);
+                        let b_float = self.builder.ins().fcvt_from_sint(types::F64, b);
+                        JitValue::Float(self.builder.ins().fdiv(a_float, b_float))
+                    }
 
                     // Floats
                     (BinaryOperator::Add, JitValue::Float(a), JitValue::Float(b)) => {

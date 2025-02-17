@@ -1,3 +1,5 @@
+use core::f64;
+
 #[test]
 fn test_add() {
     let add = jit_function! { add(a:i64, b:i64) -> i64 => r##"
@@ -244,4 +246,21 @@ fn test_not() {
     assert_eq!(not_(0), Ok(true));
     assert_eq!(not_(1), Ok(false));
     assert_eq!(not_(-1), Ok(false));
+}
+
+
+#[test]
+
+fn test_div() {
+    let div = jit_function! { div(a:i64, b:i64) -> f64 => r##"
+    def div(a: int, b: int):
+        return a / b
+"## };
+
+assert_eq!(div(5, 10), Ok(0.5));
+assert_eq!(div(5, 2), Ok(2.5));
+assert_eq!(div(12, 10), Ok(1.2));
+assert_eq!(div(7, 10), Ok(0.7));
+assert_eq!(div(-3, -1), Ok(3.0));
+assert_eq!(div(-3, 1), Ok(-3.0));
 }
