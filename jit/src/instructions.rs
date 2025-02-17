@@ -428,6 +428,9 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     (BinaryOperator::FloorDivide, JitValue::Int(a), JitValue::Int(b)) => {
                         JitValue::Int(self.builder.ins().sdiv(a, b))
                     }
+                    (BinaryOperator::Multiply, JitValue::Int(a), JitValue::Int(b)) =>{
+                        JitValue::Int(self.builder.ins().imul(a, b))
+                    }
                     (BinaryOperator::Modulo, JitValue::Int(a), JitValue::Int(b)) => {
                         JitValue::Int(self.builder.ins().srem(a, b))
                     }
