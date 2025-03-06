@@ -4,6 +4,7 @@ on:
   pull_request:
     types: [unlabeled, opened, synchronize, reopened]
   merge_group:
+  workflow_dispatch:
 
 name: CI
 
@@ -15,14 +16,19 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_ARGS: --no-default-features --features stdlib,zlib,importlib,encodings,sqlite,ssl
+  CARGO_ARGS: --no-default-features --features stdlib,importlib,encodings,sqlite,ssl
   # Skip additional tests on Windows. They are checked on Linux and MacOS.
+  # test_glob: many failing tests
+  # test_io: many failing tests
+  # test_os: many failing tests
+  # test_pathlib: support.rmtree() failing
+  # test_posixpath: OSError: (22, 'The filename, directory name, or volume label syntax is incorrect. (os error 123)')
+  # test_venv: couple of failing tests
   WINDOWS_SKIPS: >-
-    test_datetime
     test_glob
-    test_importlib
     test_io
     test_os
+    test_rlcompleter
     test_pathlib
     test_posixpath
     test_venv
@@ -34,7 +40,7 @@ env:
   # PLATFORM_INDEPENDENT_TESTS are tests that do not depend on the underlying OS. They are currently
   # only run on Linux to speed up the CI.
   PLATFORM_INDEPENDENT_TESTS: >-
-    test_argparse
+    test__colorize
     test_array
     test_asyncgen
     test_binop
@@ -59,7 +65,6 @@ env:
     test_dis
     test_enumerate
     test_exception_variations
-    test_exceptions
     test_float
     test_format
     test_fractions
@@ -100,12 +105,11 @@ env:
     test_tuple
     test_types
     test_unary
-    test_unicode
     test_unpack
     test_weakref
     test_yield_from
   # Python version targeted by the CI.
-  PYTHON_VERSION: "3.12.3"
+  PYTHON_VERSION: "3.13.1"
 
 jobs:
   rust_tests:
@@ -357,15 +361,18 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: install geckodriver
         run: |
-          wget https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz
+          wget https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz
           mkdir geckodriver
-          tar -xzf geckodriver-v0.34.0-linux64.tar.gz -C geckodriver
+          tar -xzf geckodriver-v0.36.0-linux64.tar.gz -C geckodriver
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: python -m pip install -r requirements.txt
         working-directory: ./wasm/tests
       - uses: actions/setup-node@v4
+        with:
+          cache: "npm"
+          cache-dependency-path: "wasm/demo/package-lock.json"
       - name: run test
         run: |
           export PATH=$PATH:`pwd`/../../geckodriver
@@ -375,10 +382,11 @@ jobs:
           NODE_OPTIONS: "--openssl-legacy-provider"
         working-directory: ./wasm/demo
       - uses: mwilliamson/setup-wabt-action@v3
-        with: { wabt-version: "1.0.30" }
+        with: { wabt-version: "1.0.36" }
       - name: check wasm32-unknown without js
         run: |
-          cargo build --release --manifest-path wasm/wasm-unknown-test/Cargo.toml --target wasm32-unknown-unknown --verbose
+          cd wasm/wasm-unknown-test
+          cargo build --release --verbose
           if wasm-objdump -xj Import target/wasm32-unknown-unknown/release/wasm_unknown_test.wasm; then
             echo "ERROR: wasm32-unknown module expects imports from the host environment" >2
           fi

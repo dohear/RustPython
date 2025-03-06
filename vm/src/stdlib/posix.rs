@@ -1,4 +1,4 @@
-use crate::{builtins::PyModule, PyRef, VirtualMachine};
+use crate::{PyRef, VirtualMachine, builtins::PyModule};
 use std::os::unix::io::RawFd;
 
 pub fn raw_set_inheritable(fd: RawFd, inheritable: bool) -> nix::Result<()> {
@@ -21,16 +21,16 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 #[pymodule(name = "posix", with(super::os::_os))]
 pub mod module {
     use crate::{
+        AsObject, Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
         builtins::{PyDictRef, PyInt, PyListRef, PyStrRef, PyTupleRef, PyTypeRef},
         convert::{IntoPyException, ToPyObject, TryFromObject},
         function::{Either, KwArgs, OptionalArg},
         ospath::{IOErrorBuilder, OsPath, OsPathOrFd},
         stdlib::os::{
-            errno_err, DirFd, FollowSymlinks, SupportFunc, TargetIsDirectory, _os, fs_metadata,
+            _os, DirFd, FollowSymlinks, SupportFunc, TargetIsDirectory, errno_err, fs_metadata,
         },
         types::{Constructor, Representable},
         utils::ToCString,
-        AsObject, Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
     };
     use bitflags::bitflags;
     use nix::{
@@ -352,11 +352,7 @@ pub mod module {
         {
             let [] = args.dir_fd.0;
             let res = unsafe { libc::symlink(src.as_ptr(), dst.as_ptr()) };
-            if res < 0 {
-                Err(errno_err(vm))
-            } else {
-                Ok(())
-            }
+            if res < 0 { Err(errno_err(vm)) } else { Ok(()) }
         }
     }
 
@@ -604,21 +600,13 @@ pub mod module {
                     )
                 },
             };
-            if ret != 0 {
-                Err(errno_err(vm))
-            } else {
-                Ok(())
-            }
+            if ret != 0 { Err(errno_err(vm)) } else { Ok(()) }
         }
         #[cfg(target_vendor = "apple")]
         fn mknod(self, vm: &VirtualMachine) -> PyResult<()> {
             let [] = self.dir_fd.0;
             let ret = self._mknod(vm)?;
-            if ret != 0 {
-                Err(errno_err(vm))
-            } else {
-                Ok(())
-            }
+            if ret != 0 { Err(errno_err(vm)) } else { Ok(()) }
         }
     }
 
@@ -863,7 +851,7 @@ pub mod module {
     #[pyfunction]
     fn set_blocking(fd: RawFd, blocking: bool, vm: &VirtualMachine) -> PyResult<()> {
         let _set_flag = || {
-            use nix::fcntl::{fcntl, FcntlArg, OFlag};
+            use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
             let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL)?);
             let mut new_flags = flags;
@@ -971,7 +959,7 @@ pub mod module {
     #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd",))]
     #[pyfunction]
     fn lchmod(path: OsPath, mode: u32, vm: &VirtualMachine) -> PyResult<()> {
-        extern "C" {
+        unsafe extern "C" {
             fn lchmod(path: *const libc::c_char, mode: libc::mode_t) -> libc::c_int;
         }
         let c_path = path.clone().into_cstring(vm)?;
@@ -1605,7 +1593,7 @@ pub mod module {
     // from libstd:
     // https://github.com/rust-lang/rust/blob/daecab3a784f28082df90cebb204998051f3557d/src/libstd/sys/unix/fs.rs#L1251
     #[cfg(target_os = "macos")]
-    extern "C" {
+    unsafe extern "C" {
         fn fcopyfile(
             in_fd: libc::c_int,
             out_fd: libc::c_int,
@@ -1618,11 +1606,7 @@ pub mod module {
     #[pyfunction]
     fn _fcopyfile(in_fd: i32, out_fd: i32, flags: i32, vm: &VirtualMachine) -> PyResult<()> {
         let ret = unsafe { fcopyfile(in_fd, out_fd, std::ptr::null_mut(), flags as u32) };
-        if ret < 0 {
-            Err(errno_err(vm))
-        } else {
-            Ok(())
-        }
+        if ret < 0 { Err(errno_err(vm)) } else { Ok(()) }
     }
 
     #[pyfunction]
@@ -2299,7 +2283,7 @@ pub mod module {
 
     #[cfg(target_os = "linux")]
     unsafe fn sys_getrandom(buf: *mut libc::c_void, buflen: usize, flags: u32) -> isize {
-        libc::syscall(libc::SYS_getrandom, buf, buflen, flags as usize) as _
+        unsafe { libc::syscall(libc::SYS_getrandom, buf, buflen, flags as usize) as _ }
     }
 
     #[cfg(target_os = "linux")]

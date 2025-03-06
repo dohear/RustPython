@@ -1,8 +1,8 @@
 use crate::{
+    AsObject, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, VirtualMachine,
     builtins::{PyStr, PyStrInterned, PyTypeRef},
     common::lock::PyRwLock,
     convert::ToPyObject,
-    AsObject, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, VirtualMachine,
 };
 use std::{
     borrow::{Borrow, ToOwned},
@@ -117,7 +117,7 @@ impl CachedPyStrRef {
     /// the given cache must be alive while returned reference is alive
     #[inline]
     unsafe fn as_interned_str(&self) -> &'static PyStrInterned {
-        std::mem::transmute_copy(self)
+        unsafe { std::mem::transmute_copy(self) }
     }
 
     #[inline]

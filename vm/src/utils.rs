@@ -1,7 +1,8 @@
 use crate::{
+    PyObjectRef, PyResult, VirtualMachine,
     builtins::PyStr,
     convert::{ToPyException, ToPyObject},
-    PyObjectRef, PyResult, VirtualMachine,
+    exceptions::cstring_error,
 };
 
 pub fn hash_iter<'a, I: IntoIterator<Item = &'a PyObjectRef>>(
@@ -17,21 +18,21 @@ impl ToPyObject for std::convert::Infallible {
     }
 }
 
-pub trait ToCString {
-    fn to_cstring(&self, vm: &VirtualMachine) -> PyResult<std::ffi::CString>;
-}
-
-impl ToCString for &str {
-    fn to_cstring(&self, vm: &VirtualMachine) -> PyResult<std::ffi::CString> {
-        std::ffi::CString::new(*self).map_err(|err| err.to_pyexception(vm))
-    }
-}
-
-impl ToCString for PyStr {
+pub trait ToCString: AsRef<str> {
     fn to_cstring(&self, vm: &VirtualMachine) -> PyResult<std::ffi::CString> {
         std::ffi::CString::new(self.as_ref()).map_err(|err| err.to_pyexception(vm))
     }
+    fn ensure_no_nul(&self, vm: &VirtualMachine) -> PyResult<()> {
+        if self.as_ref().as_bytes().contains(&b'\0') {
+            Err(cstring_error(vm))
+        } else {
+            Ok(())
+        }
+    }
 }
+
+impl ToCString for &str {}
+impl ToCString for PyStr {}
 
 pub(crate) fn collection_repr<'a, I>(
     class_name: Option<&str>,

@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::{builtins::PyModule, PyRef, VirtualMachine};
+use crate::{PyRef, VirtualMachine, builtins::PyModule};
 
 pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
     let module = winreg::make_module(vm);
@@ -29,10 +29,10 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 mod winreg {
     use crate::common::lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
     use crate::{
-        builtins::PyStrRef, convert::ToPyException, PyObjectRef, PyPayload, PyRef, PyResult,
-        TryFromObject, VirtualMachine,
+        PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine, builtins::PyStrRef,
+        convert::ToPyException,
     };
-    use ::winreg::{enums::RegType, RegKey, RegValue};
+    use ::winreg::{RegKey, RegValue, enums::RegType};
     use std::mem::ManuallyDrop;
     use std::{ffi::OsStr, io};
     use windows_sys::Win32::Foundation;
@@ -47,9 +47,13 @@ mod winreg {
     // value types
     #[pyattr]
     pub use windows_sys::Win32::System::Registry::{
-        REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_DWORD_LITTLE_ENDIAN, REG_EXPAND_SZ,
-        REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
-        REG_QWORD_LITTLE_ENDIAN, REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ,
+        REG_BINARY, REG_CREATED_NEW_KEY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_DWORD_LITTLE_ENDIAN,
+        REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE,
+        REG_NOTIFY_CHANGE_ATTRIBUTES, REG_NOTIFY_CHANGE_LAST_SET, REG_NOTIFY_CHANGE_NAME,
+        REG_NOTIFY_CHANGE_SECURITY, REG_OPENED_EXISTING_KEY, REG_OPTION_BACKUP_RESTORE,
+        REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE, REG_OPTION_OPEN_LINK, REG_OPTION_RESERVED,
+        REG_OPTION_VOLATILE, REG_QWORD, REG_QWORD_LITTLE_ENDIAN, REG_RESOURCE_LIST,
+        REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, REG_WHOLE_HIVE_VOLATILE,
     };
 
     #[pyattr]
@@ -98,7 +102,7 @@ mod winreg {
 
         #[pymethod(magic)]
         fn bool(&self) -> bool {
-            self.key().raw_handle() != 0
+            !self.key().raw_handle().is_null()
         }
         #[pymethod(magic)]
         fn enter(zelf: PyRef<Self>) -> PyRef<Self> {

@@ -3,17 +3,17 @@
 //! This module makes use of the parser logic, and translates all ast nodes
 //! into python ast.AST objects.
 
-mod gen;
+mod r#gen;
 
 use crate::{
-    builtins::{self, PyDict, PyModule, PyStrRef, PyType},
-    class::{PyClassImpl, StaticType},
-    compiler::core::bytecode::OpArgType,
-    compiler::CompileError,
-    convert::ToPyException,
-    source_code::{LinearLocator, OneIndexed, SourceLocation, SourceRange},
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     VirtualMachine,
+    builtins::{self, PyDict, PyModule, PyStrRef, PyType},
+    class::{PyClassImpl, StaticType},
+    compiler::CompileError,
+    compiler::core::bytecode::OpArgType,
+    convert::ToPyException,
+    source_code::{LinearLocator, OneIndexed, SourceLocation, SourceRange},
 };
 use num_complex::Complex64;
 use num_traits::{ToPrimitive, Zero};
@@ -26,9 +26,9 @@ use rustpython_parser as parser;
 #[pymodule]
 mod _ast {
     use crate::{
+        AsObject, Context, PyObjectRef, PyPayload, PyResult, VirtualMachine,
         builtins::{PyStrRef, PyTupleRef},
         function::FuncArgs,
-        AsObject, Context, PyObjectRef, PyPayload, PyResult, VirtualMachine,
     };
     #[pyattr]
     #[pyclass(module = "_ast", name = "AST")]
@@ -398,6 +398,6 @@ pub const PY_COMPILE_FLAGS_MASK: i32 = PY_COMPILE_FLAG_AST_ONLY
 
 pub fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
     let module = _ast::make_module(vm);
-    gen::extend_module_nodes(vm, &module);
+    r#gen::extend_module_nodes(vm, &module);
     module
 }

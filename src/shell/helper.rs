@@ -1,8 +1,9 @@
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use rustpython_vm::{
+    AsObject, PyResult, TryFromObject, VirtualMachine,
     builtins::{PyDictRef, PyStrRef},
     function::ArgIterable,
-    identifier, AsObject, PyResult, TryFromObject, VirtualMachine,
+    identifier,
 };
 
 pub struct ShellHelper<'vm> {
@@ -107,7 +108,7 @@ impl<'vm> ShellHelper<'vm> {
             .filter(|res| {
                 res.as_ref()
                     .ok()
-                    .map_or(true, |s| s.as_str().starts_with(word_start))
+                    .is_none_or(|s| s.as_str().starts_with(word_start))
             })
             .collect::<Result<Vec<_>, _>>()
             .ok()?;

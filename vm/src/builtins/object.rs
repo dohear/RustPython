@@ -2,11 +2,11 @@ use super::{PyDictRef, PyList, PyStr, PyStrRef, PyType, PyTypeRef};
 use crate::common::hash::PyHash;
 use crate::types::PyTypeFlags;
 use crate::{
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
     class::PyClassImpl,
     convert::ToPyResult,
     function::{Either, FuncArgs, PyArithmeticValue, PyComparisonValue, PySetterValue},
     types::{Constructor, PyComparisonOp},
-    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 use itertools::Itertools;
 
@@ -113,7 +113,7 @@ fn object_getstate_default(obj: &PyObject, required: bool, vm: &VirtualMachine) 
     //     ));
     // }
 
-    let state = if obj.dict().map_or(true, |d| d.is_empty()) {
+    let state = if obj.dict().is_none_or(|d| d.is_empty()) {
         vm.ctx.none()
     } else {
         // let state = object_get_dict(obj.clone(), obj.ctx()).unwrap();

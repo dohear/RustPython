@@ -241,11 +241,7 @@ pub mod levenshtein {
         if b.is_ascii_uppercase() {
             b += b'a' - b'A';
         }
-        if a == b {
-            CASE_COST
-        } else {
-            MOVE_COST
-        }
+        if a == b { CASE_COST } else { MOVE_COST }
     }
 
     pub fn levenshtein_distance(a: &str, b: &str, max_cost: usize) -> usize {
@@ -320,6 +316,37 @@ pub mod levenshtein {
             result
         })
     }
+}
+
+/// Replace all tabs in a string with spaces, using the given tab size.
+pub fn expandtabs(input: &str, tab_size: usize) -> String {
+    let tab_stop = tab_size;
+    let mut expanded_str = String::with_capacity(input.len());
+    let mut tab_size = tab_stop;
+    let mut col_count = 0usize;
+    for ch in input.chars() {
+        match ch {
+            '\t' => {
+                let num_spaces = tab_size - col_count;
+                col_count += num_spaces;
+                let expand = " ".repeat(num_spaces);
+                expanded_str.push_str(&expand);
+            }
+            '\r' | '\n' => {
+                expanded_str.push(ch);
+                col_count = 0;
+                tab_size = 0;
+            }
+            _ => {
+                expanded_str.push(ch);
+                col_count += 1;
+            }
+        }
+        if col_count >= tab_size {
+            tab_size += tab_stop;
+        }
+    }
+    expanded_str
 }
 
 /// Creates an [`AsciiStr`][ascii::AsciiStr] from a string literal, throwing a compile error if the

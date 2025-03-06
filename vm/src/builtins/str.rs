@@ -1,10 +1,12 @@
 use super::{
+    PositionIterInternal, PyBytesRef, PyDict, PyTupleRef, PyType, PyTypeRef,
     int::{PyInt, PyIntRef},
     iter::IterStatus::{self, Exhausted},
-    PositionIterInternal, PyBytesRef, PyDict, PyTupleRef, PyType, PyTypeRef,
 };
 use crate::{
-    anystr::{self, adjust_indices, AnyStr, AnyStrContainer, AnyStrWrapper},
+    AsObject, Context, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
+    TryFromBorrowedObject, VirtualMachine,
+    anystr::{self, AnyStr, AnyStrContainer, AnyStrWrapper, adjust_indices},
     atomic_func,
     class::PyClassImpl,
     common::str::{BorrowedStr, PyStrKind, PyStrKindData},
@@ -20,8 +22,6 @@ use crate::{
         AsMapping, AsNumber, AsSequence, Comparable, Constructor, Hashable, IterNext, Iterable,
         PyComparisonOp, Representable, SelfIter, Unconstructible,
     },
-    AsObject, Context, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
-    TryFromBorrowedObject, VirtualMachine,
 };
 use ascii::{AsciiStr, AsciiString};
 use bstr::ByteSlice;
@@ -62,7 +62,7 @@ pub struct PyStr {
 }
 
 impl fmt::Debug for PyStr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PyStr")
             .field("value", &self.as_str())
             .field("kind", &self.kind)
@@ -192,7 +192,7 @@ pub struct PyStrIterator {
 }
 
 unsafe impl Traverse for PyStrIterator {
-    fn traverse(&self, tracer: &mut TraverseFn) {
+    fn traverse(&self, tracer: &mut TraverseFn<'_>) {
         // No need to worry about deadlock, for inner is a PyStr and can't make ref cycle
         self.internal.lock().0.traverse(tracer);
     }
@@ -313,7 +313,7 @@ impl PyStr {
     /// # Safety
     /// Given `bytes` must be ascii
     pub unsafe fn new_ascii_unchecked(bytes: Vec<u8>) -> Self {
-        Self::new_str_unchecked(bytes, PyStrKind::Ascii)
+        unsafe { Self::new_str_unchecked(bytes, PyStrKind::Ascii) }
     }
 
     pub fn new_ref(zelf: impl Into<Self>, ctx: &Context) -> PyRef<Self> {
@@ -351,7 +351,7 @@ impl PyStr {
         }
     }
 
-    fn borrow(&self) -> &BorrowedStr {
+    fn borrow(&self) -> &BorrowedStr<'_> {
         unsafe { std::mem::transmute(self) }
     }
 
@@ -904,11 +904,7 @@ impl PyStr {
                 '\n' => 1,
                 '\r' => {
                     let is_rn = enumerated.next_if(|(_, ch)| *ch == '\n').is_some();
-                    if is_rn {
-                        2
-                    } else {
-                        1
-                    }
+                    if is_rn { 2 } else { 1 }
                 }
                 '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{0085}' | '\u{2028}'
                 | '\u{2029}' => ch.len_utf8(),
@@ -1125,33 +1121,7 @@ impl PyStr {
 
     #[pymethod]
     fn expandtabs(&self, args: anystr::ExpandTabsArgs) -> String {
-        let tab_stop = args.tabsize();
-        let mut expanded_str = String::with_capacity(self.byte_len());
-        let mut tab_size = tab_stop;
-        let mut col_count = 0usize;
-        for ch in self.as_str().chars() {
-            match ch {
-                '\t' => {
-                    let num_spaces = tab_size - col_count;
-                    col_count += num_spaces;
-                    let expand = " ".repeat(num_spaces);
-                    expanded_str.push_str(&expand);
-                }
-                '\r' | '\n' => {
-                    expanded_str.push(ch);
-                    col_count = 0;
-                    tab_size = 0;
-                }
-                _ => {
-                    expanded_str.push(ch);
-                    col_count += 1;
-                }
-            }
-            if col_count >= tab_size {
-                tab_size += tab_stop;
-            }
-        }
-        expanded_str
+        rustpython_common::str::expandtabs(self.as_str(), args.tabsize())
     }
 
     #[pymethod]
@@ -1591,80 +1561,6 @@ impl AsRef<str> for PyExact<PyStr> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Interpreter;
-
-    #[test]
-    fn str_title() {
-        let tests = vec![
-            (" Hello ", " hello "),
-            ("Hello ", "hello "),
-            ("Hello ", "Hello "),
-            ("Format This As Title String", "fOrMaT thIs aS titLe String"),
-            ("Format,This-As*Title;String", "fOrMaT,thIs-aS*titLe;String"),
-            ("Getint", "getInt"),
-            ("Greek Ωppercases ...", "greek ωppercases ..."),
-            ("Greek ῼitlecases ...", "greek ῳitlecases ..."),
-        ];
-        for (title, input) in tests {
-            assert_eq!(PyStr::from(input).title().as_str(), title);
-        }
-    }
-
-    #[test]
-    fn str_istitle() {
-        let pos = vec![
-            "A",
-            "A Titlecased Line",
-            "A\nTitlecased Line",
-            "A Titlecased, Line",
-            "Greek Ωppercases ...",
-            "Greek ῼitlecases ...",
-        ];
-
-        for s in pos {
-            assert!(PyStr::from(s).istitle());
-        }
-
-        let neg = vec![
-            "",
-            "a",
-            "\n",
-            "Not a capitalized String",
-            "Not\ta Titlecase String",
-            "Not--a Titlecase String",
-            "NOT",
-        ];
-        for s in neg {
-            assert!(!PyStr::from(s).istitle());
-        }
-    }
-
-    #[test]
-    fn str_maketrans_and_translate() {
-        Interpreter::without_stdlib(Default::default()).enter(|vm| {
-            let table = vm.ctx.new_dict();
-            table
-                .set_item("a", vm.ctx.new_str("🎅").into(), vm)
-                .unwrap();
-            table.set_item("b", vm.ctx.none(), vm).unwrap();
-            table
-                .set_item("c", vm.ctx.new_str(ascii!("xda")).into(), vm)
-                .unwrap();
-            let translated =
-                PyStr::maketrans(table.into(), OptionalArg::Missing, OptionalArg::Missing, vm)
-                    .unwrap();
-            let text = PyStr::from("abc");
-            let translated = text.translate(translated, vm).unwrap();
-            assert_eq!(translated, "🎅xda".to_owned());
-            let translated = text.translate(vm.ctx.new_int(3).into(), vm);
-            assert_eq!("TypeError", &*translated.unwrap_err().class().name(),);
-        })
-    }
-}
-
 impl AnyStrWrapper for PyStrRef {
     type Str = str;
     fn as_ref(&self) -> &str {
@@ -1804,5 +1700,79 @@ impl AsRef<str> for PyStrInterned {
     #[inline(always)]
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Interpreter;
+
+    #[test]
+    fn str_title() {
+        let tests = vec![
+            (" Hello ", " hello "),
+            ("Hello ", "hello "),
+            ("Hello ", "Hello "),
+            ("Format This As Title String", "fOrMaT thIs aS titLe String"),
+            ("Format,This-As*Title;String", "fOrMaT,thIs-aS*titLe;String"),
+            ("Getint", "getInt"),
+            ("Greek Ωppercases ...", "greek ωppercases ..."),
+            ("Greek ῼitlecases ...", "greek ῳitlecases ..."),
+        ];
+        for (title, input) in tests {
+            assert_eq!(PyStr::from(input).title().as_str(), title);
+        }
+    }
+
+    #[test]
+    fn str_istitle() {
+        let pos = vec![
+            "A",
+            "A Titlecased Line",
+            "A\nTitlecased Line",
+            "A Titlecased, Line",
+            "Greek Ωppercases ...",
+            "Greek ῼitlecases ...",
+        ];
+
+        for s in pos {
+            assert!(PyStr::from(s).istitle());
+        }
+
+        let neg = vec![
+            "",
+            "a",
+            "\n",
+            "Not a capitalized String",
+            "Not\ta Titlecase String",
+            "Not--a Titlecase String",
+            "NOT",
+        ];
+        for s in neg {
+            assert!(!PyStr::from(s).istitle());
+        }
+    }
+
+    #[test]
+    fn str_maketrans_and_translate() {
+        Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            let table = vm.ctx.new_dict();
+            table
+                .set_item("a", vm.ctx.new_str("🎅").into(), vm)
+                .unwrap();
+            table.set_item("b", vm.ctx.none(), vm).unwrap();
+            table
+                .set_item("c", vm.ctx.new_str(ascii!("xda")).into(), vm)
+                .unwrap();
+            let translated =
+                PyStr::maketrans(table.into(), OptionalArg::Missing, OptionalArg::Missing, vm)
+                    .unwrap();
+            let text = PyStr::from("abc");
+            let translated = text.translate(translated, vm).unwrap();
+            assert_eq!(translated, "🎅xda".to_owned());
+            let translated = text.translate(vm.ctx.new_int(3).into(), vm);
+            assert_eq!("TypeError", &*translated.unwrap_err().class().name(),);
+        })
     }
 }

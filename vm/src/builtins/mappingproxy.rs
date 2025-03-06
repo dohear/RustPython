@@ -1,5 +1,6 @@
 use super::{PyDict, PyDictRef, PyGenericAlias, PyList, PyTuple, PyType, PyTypeRef};
 use crate::{
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     atomic_func,
     class::PyClassImpl,
     convert::ToPyObject,
@@ -10,7 +11,6 @@ use crate::{
         AsMapping, AsNumber, AsSequence, Comparable, Constructor, Iterable, PyComparisonOp,
         Representable,
     },
-    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 use once_cell::sync::Lazy;
 
@@ -27,10 +27,10 @@ enum MappingProxyInner {
 }
 
 unsafe impl Traverse for MappingProxyInner {
-    fn traverse(&self, tracer_fn: &mut TraverseFn) {
+    fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
         match self {
-            MappingProxyInner::Class(ref r) => r.traverse(tracer_fn),
-            MappingProxyInner::Mapping(ref arg) => arg.traverse(tracer_fn),
+            MappingProxyInner::Class(r) => r.traverse(tracer_fn),
+            MappingProxyInner::Mapping(arg) => arg.traverse(tracer_fn),
         }
     }
 }

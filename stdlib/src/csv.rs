@@ -4,11 +4,11 @@ pub(crate) use _csv::make_module;
 mod _csv {
     use crate::common::lock::PyMutex;
     use crate::vm::{
+        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
         builtins::{PyBaseExceptionRef, PyInt, PyNone, PyStr, PyType, PyTypeError, PyTypeRef},
         function::{ArgIterable, ArgumentError, FromArgs, FuncArgs, OptionalArg},
         protocol::{PyIter, PyIterReturn},
         types::{Constructor, IterNext, Iterable, SelfIter},
-        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
     };
     use csv_core::Terminator;
     use itertools::{self, Itertools};
@@ -272,12 +272,12 @@ mod _csv {
         let Some(name) = name.payload_if_subclass::<PyStr>(vm) else {
             return Err(vm.new_type_error("argument 0 must be a string".to_string()));
         };
-        let mut dialect = match dialect {
+        let dialect = match dialect {
             OptionalArg::Present(d) => PyDialect::try_from_object(vm, d)
                 .map_err(|_| vm.new_type_error("argument 1 must be a dialect object".to_owned()))?,
             OptionalArg::Missing => opts.result(vm)?,
         };
-        opts.update_pydialect(&mut dialect);
+        let dialect = opts.update_pydialect(dialect);
         GLOBAL_HASHMAP
             .lock()
             .insert(name.as_str().to_owned(), dialect);
@@ -396,7 +396,7 @@ mod _csv {
             Some(write_meth) => write_meth,
             None if file.is_callable() => file,
             None => {
-                return Err(vm.new_type_error("argument 1 must have a \"write\" method".to_owned()))
+                return Err(vm.new_type_error("argument 1 must have a \"write\" method".to_owned()));
             }
         };
 
@@ -665,7 +665,7 @@ mod _csv {
     }
 
     impl FormatOptions {
-        fn update_pydialect<'b>(&self, res: &'b mut PyDialect) -> &'b mut PyDialect {
+        fn update_pydialect(&self, mut res: PyDialect) -> PyDialect {
             macro_rules! check_and_fill {
                 ($res:ident, $e:ident) => {{
                     if let Some(t) = self.$e {
@@ -699,24 +699,18 @@ mod _csv {
                 DialectItem::Str(name) => {
                     let g = GLOBAL_HASHMAP.lock();
                     if let Some(dialect) = g.get(name) {
-                        let mut dialect = *dialect;
-                        self.update_pydialect(&mut dialect);
-                        Ok(dialect)
+                        Ok(self.update_pydialect(*dialect))
                     } else {
                         Err(new_csv_error(vm, format!("{} is not registed.", name)))
                     }
                     // TODO
                     // Maybe need to update the obj from HashMap
                 }
-                DialectItem::Obj(mut o) => {
-                    self.update_pydialect(&mut o);
-                    Ok(o)
-                }
+                DialectItem::Obj(o) => Ok(self.update_pydialect(*o)),
                 DialectItem::None => {
                     let g = GLOBAL_HASHMAP.lock();
-                    let mut res = *g.get("excel").unwrap();
-                    self.update_pydialect(&mut res);
-                    Ok(res)
+                    let res = *g.get("excel").unwrap();
+                    Ok(self.update_pydialect(res))
                 }
             }
         }
@@ -916,7 +910,7 @@ mod _csv {
     }
 
     impl fmt::Debug for Reader {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "_csv.reader")
         }
     }
@@ -1001,7 +995,7 @@ mod _csv {
                     csv_core::ReadRecordResult::OutputEndsFull => resize_buf(output_ends),
                     csv_core::ReadRecordResult::Record => break,
                     csv_core::ReadRecordResult::End => {
-                        return Ok(PyIterReturn::StopIteration(None))
+                        return Ok(PyIterReturn::StopIteration(None));
                     }
                 }
             }
@@ -1070,7 +1064,7 @@ mod _csv {
     }
 
     impl fmt::Debug for Writer {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "_csv.writer")
         }
     }

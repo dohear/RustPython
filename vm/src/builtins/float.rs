@@ -1,9 +1,11 @@
 // spell-checker:ignore numer denom
 
 use super::{
-    try_bigint_to_f64, PyByteArray, PyBytes, PyInt, PyIntRef, PyStr, PyStrRef, PyType, PyTypeRef,
+    PyByteArray, PyBytes, PyInt, PyIntRef, PyStr, PyStrRef, PyType, PyTypeRef, try_bigint_to_f64,
 };
 use crate::{
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+    TryFromBorrowedObject, TryFromObject, VirtualMachine,
     class::PyClassImpl,
     common::{float_ops, hash},
     convert::{IntoPyException, ToPyObject, ToPyResult},
@@ -14,8 +16,6 @@ use crate::{
     },
     protocol::PyNumberMethods,
     types::{AsNumber, Callable, Comparable, Constructor, Hashable, PyComparisonOp, Representable},
-    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
-    TryFromBorrowedObject, TryFromObject, VirtualMachine,
 };
 use malachite_bigint::{BigInt, ToBigInt};
 use num_complex::Complex64;
@@ -124,8 +124,8 @@ fn inner_divmod(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult<(f64, f64)> {
 
 pub fn float_pow(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult {
     if v1.is_zero() && v2.is_sign_negative() {
-        let msg = format!("{v1} cannot be raised to a negative power");
-        Err(vm.new_zero_division_error(msg))
+        let msg = "0.0 cannot be raised to a negative power";
+        Err(vm.new_zero_division_error(msg.to_owned()))
     } else if v1.is_sign_negative() && (v2.floor() - v2).abs() > f64::EPSILON {
         let v1 = Complex64::new(v1, 0.);
         let v2 = Complex64::new(v2, 0.);

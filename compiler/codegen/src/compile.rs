@@ -8,21 +8,21 @@
 #![deny(clippy::cast_possible_truncation)]
 
 use crate::{
+    IndexSet,
     error::{CodegenError, CodegenErrorType},
     ir,
     symboltable::{self, SymbolFlags, SymbolScope, SymbolTable},
-    IndexSet,
 };
 use itertools::Itertools;
 use num_complex::Complex64;
 use num_traits::ToPrimitive;
 use rustpython_ast::located::{self as located_ast, Located};
 use rustpython_compiler_core::{
+    Mode,
     bytecode::{
         self, Arg as OpArgMarker, CodeObject, ComparisonOperator, ConstantData, Instruction, OpArg,
         OpArgType,
     },
-    Mode,
 };
 use rustpython_parser_core::source_code::{LineNumber, SourceLocation};
 use std::borrow::Cow;
@@ -975,7 +975,7 @@ impl Compiler {
                 }
             }
             located_ast::Expr::BinOp(_) | located_ast::Expr::UnaryOp(_) => {
-                return Err(self.error(CodegenErrorType::Delete("expression")))
+                return Err(self.error(CodegenErrorType::Delete("expression")));
             }
             _ => return Err(self.error(CodegenErrorType::Delete(expression.python_name()))),
         }
@@ -1213,7 +1213,7 @@ impl Compiler {
 
             if !finalbody.is_empty() {
                 emit!(self, Instruction::PopBlock); // pop excepthandler block
-                                                    // We enter the finally block, without exception.
+                // We enter the finally block, without exception.
                 emit!(self, Instruction::EnterFinally);
             }
 
@@ -2723,7 +2723,7 @@ impl Compiler {
 
     fn compile_keywords(&mut self, keywords: &[located_ast::Keyword]) -> CompileResult<()> {
         let mut size = 0;
-        let groupby = keywords.iter().group_by(|e| e.arg.is_none());
+        let groupby = keywords.iter().chunk_by(|e| e.arg.is_none());
         for (is_unpacking, sub_keywords) in &groupby {
             if is_unpacking {
                 for keyword in sub_keywords {
@@ -2886,7 +2886,7 @@ impl Compiler {
                         (false, element)
                     }
                 })
-                .group_by(|(starred, _)| *starred);
+                .chunk_by(|(starred, _)| *starred);
 
             for (starred, run) in &groups {
                 let mut run_size = 0;
@@ -3124,7 +3124,9 @@ impl Compiler {
                 | "with_statement" | "print_function" | "unicode_literals" | "generator_stop" => {}
                 "annotations" => self.future_annotations = true,
                 other => {
-                    return Err(self.error(CodegenErrorType::InvalidFutureFeature(other.to_owned())))
+                    return Err(
+                        self.error(CodegenErrorType::InvalidFutureFeature(other.to_owned()))
+                    );
                 }
             }
         }
@@ -3302,13 +3304,13 @@ impl Compiler {
                 elt, generators, ..
             }) => {
                 Self::contains_await(elt)
-                    || generators.iter().any(|gen| Self::contains_await(&gen.iter))
+                    || generators.iter().any(|jen| Self::contains_await(&jen.iter))
             }
             Expr::SetComp(located_ast::ExprSetComp {
                 elt, generators, ..
             }) => {
                 Self::contains_await(elt)
-                    || generators.iter().any(|gen| Self::contains_await(&gen.iter))
+                    || generators.iter().any(|jen| Self::contains_await(&jen.iter))
             }
             Expr::DictComp(located_ast::ExprDictComp {
                 key,
@@ -3318,13 +3320,13 @@ impl Compiler {
             }) => {
                 Self::contains_await(key)
                     || Self::contains_await(value)
-                    || generators.iter().any(|gen| Self::contains_await(&gen.iter))
+                    || generators.iter().any(|jen| Self::contains_await(&jen.iter))
             }
             Expr::GeneratorExp(located_ast::ExprGeneratorExp {
                 elt, generators, ..
             }) => {
                 Self::contains_await(elt)
-                    || generators.iter().any(|gen| Self::contains_await(&gen.iter))
+                    || generators.iter().any(|jen| Self::contains_await(&jen.iter))
             }
             Expr::Starred(expr) => Self::contains_await(&expr.value),
             Expr::IfExp(located_ast::ExprIfExp {
@@ -3368,17 +3370,51 @@ impl EmitArg<bytecode::Label> for ir::BlockIdx {
     }
 }
 
+/// Strips leading whitespace from a docstring.
+///
+/// The code has been ported from `_PyCompile_CleanDoc` in cpython.
+/// `inspect.cleandoc` is also a good reference, but has a few incompatibilities.
+fn clean_doc(doc: &str) -> String {
+    let doc = rustpython_common::str::expandtabs(doc, 8);
+    // First pass: find minimum indentation of any non-blank lines
+    // after first line.
+    let margin = doc
+        .lines()
+        // Find the non-blank lines
+        .filter(|line| !line.trim().is_empty())
+        // get the one with the least indentation
+        .map(|line| line.chars().take_while(|c| c == &' ').count())
+        .min();
+    if let Some(margin) = margin {
+        let mut cleaned = String::with_capacity(doc.len());
+        // copy first line without leading whitespace
+        if let Some(first_line) = doc.lines().next() {
+            cleaned.push_str(first_line.trim_start());
+        }
+        // copy subsequent lines without margin.
+        for line in doc.split('\n').skip(1) {
+            cleaned.push('\n');
+            let cleaned_line = line.chars().skip(margin).collect::<String>();
+            cleaned.push_str(&cleaned_line);
+        }
+
+        cleaned
+    } else {
+        doc.to_owned()
+    }
+}
+
 fn split_doc<'a>(
     body: &'a [located_ast::Stmt],
     opts: &CompileOpts,
 ) -> (Option<String>, &'a [located_ast::Stmt]) {
     if let Some((located_ast::Stmt::Expr(expr), body_rest)) = body.split_first() {
         if let Some(doc) = try_get_constant_string(std::slice::from_ref(&expr.value)) {
-            if opts.optimize < 2 {
-                return (Some(doc), body_rest);
+            return if opts.optimize < 2 {
+                (Some(clean_doc(&doc)), body_rest)
             } else {
-                return (None, body_rest);
-            }
+                (None, body_rest)
+            };
         }
     }
     (None, body)
@@ -3443,12 +3479,12 @@ impl ToU32 for usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustpython_parser::ast::Suite;
     use rustpython_parser::Parse;
+    use rustpython_parser::ast::Suite;
     use rustpython_parser_core::source_code::LinearLocator;
 
     fn compile_exec(source: &str) -> CodeObject {
-        let mut locator: LinearLocator = LinearLocator::new(source);
+        let mut locator: LinearLocator<'_> = LinearLocator::new(source);
         use rustpython_parser::ast::fold::Fold;
         let mut compiler: Compiler = Compiler::new(
             CompileOpts::default(),

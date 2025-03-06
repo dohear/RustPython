@@ -1,19 +1,32 @@
-use crate::vm::{builtins::PyModule, PyRef, VirtualMachine};
+use crate::vm::{PyRef, VirtualMachine, builtins::PyModule};
+use openssl_probe::ProbeResult;
 
 pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
-    // if openssl is vendored, it doesn't know the locations of system certificates
-    #[cfg(feature = "ssl-vendor")]
-    if let None | Some("0") = option_env!("OPENSSL_NO_VENDOR") {
-        openssl_probe::init_ssl_cert_env_vars();
-    }
-    openssl::init();
+    // if openssl is vendored, it doesn't know the locations
+    // of system certificates - cache the probe result now.
+    #[cfg(openssl_vendored)]
+    LazyLock::force(&PROBE);
     _ssl::make_module(vm)
+}
+
+// define our own copy of ProbeResult so we can handle the vendor case
+// easily, without having to have a bunch of cfgs
+cfg_if::cfg_if! {
+    if #[cfg(openssl_vendored)] {
+        use std::sync::LazyLock;
+        static PROBE: LazyLock<ProbeResult> = LazyLock::new(openssl_probe::probe);
+        fn probe() -> &'static ProbeResult { &PROBE }
+    } else {
+        fn probe() -> &'static ProbeResult {
+            &ProbeResult { cert_file: None, cert_dir: None }
+        }
+    }
 }
 
 #[allow(non_upper_case_globals)]
 #[pymodule(with(ossl101, windows))]
 mod _ssl {
-    use super::bio;
+    use super::{bio, probe};
     use crate::{
         common::{
             ascii,
@@ -23,6 +36,7 @@ mod _ssl {
         },
         socket::{self, PySocket},
         vm::{
+            PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
             builtins::{PyBaseExceptionRef, PyStrRef, PyType, PyTypeRef, PyWeak},
             convert::{ToPyException, ToPyObject},
             exceptions,
@@ -32,7 +46,6 @@ mod _ssl {
             },
             types::Constructor,
             utils::ToCString,
-            PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
         },
     };
     use crossbeam_utils::atomic::AtomicCell;
@@ -42,22 +55,21 @@ mod _ssl {
         error::ErrorStack,
         nid::Nid,
         ssl::{self, SslContextBuilder, SslOptions, SslVerifyMode},
-        x509::{self, X509Ref, X509},
+        x509::{self, X509, X509Ref},
     };
     use openssl_sys as sys;
+    use rustpython_vm::ospath::OsPath;
     use std::{
         ffi::CStr,
         fmt,
         io::{Read, Write},
+        path::Path,
         time::Instant,
     };
 
     // Constants
     #[pyattr]
     use sys::{
-        SSL_OP_NO_SSLv2 as OP_NO_SSLv2,
-        SSL_OP_NO_SSLv3 as OP_NO_SSLv3,
-        SSL_OP_NO_TLSv1 as OP_NO_TLSv1,
         // TODO: so many more of these
         SSL_AD_DECODE_ERROR as ALERT_DESCRIPTION_DECODE_ERROR,
         SSL_AD_ILLEGAL_PARAMETER as ALERT_DESCRIPTION_ILLEGAL_PARAMETER,
@@ -77,7 +89,10 @@ mod _ssl {
         // X509_V_FLAG_X509_STRICT as VERIFY_X509_STRICT,
         SSL_ERROR_ZERO_RETURN,
         SSL_OP_CIPHER_SERVER_PREFERENCE as OP_CIPHER_SERVER_PREFERENCE,
+        SSL_OP_NO_SSLv2 as OP_NO_SSLv2,
+        SSL_OP_NO_SSLv3 as OP_NO_SSLv3,
         SSL_OP_NO_TICKET as OP_NO_TICKET,
+        SSL_OP_NO_TLSv1 as OP_NO_TLSv1,
         SSL_OP_SINGLE_DH_USE as OP_SINGLE_DH_USE,
     };
 
@@ -283,7 +298,7 @@ mod _ssl {
         if ptr.is_null() {
             None
         } else {
-            Some(Asn1Object::from_ptr(ptr))
+            Some(unsafe { Asn1Object::from_ptr(ptr) })
         }
     }
 
@@ -354,21 +369,43 @@ mod _ssl {
             .ok_or_else(|| vm.new_value_error(format!("unknown NID {nid}")))
     }
 
+    fn get_cert_file_dir() -> (&'static Path, &'static Path) {
+        let probe = probe();
+        // on windows, these should be utf8 strings
+        fn path_from_bytes(c: &CStr) -> &Path {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                std::ffi::OsStr::from_bytes(c.to_bytes()).as_ref()
+            }
+            #[cfg(windows)]
+            {
+                c.to_str().unwrap().as_ref()
+            }
+        }
+        let cert_file = probe.cert_file.as_deref().unwrap_or_else(|| {
+            path_from_bytes(unsafe { CStr::from_ptr(sys::X509_get_default_cert_file()) })
+        });
+        let cert_dir = probe.cert_dir.as_deref().unwrap_or_else(|| {
+            path_from_bytes(unsafe { CStr::from_ptr(sys::X509_get_default_cert_dir()) })
+        });
+        (cert_file, cert_dir)
+    }
+
     #[pyfunction]
-    fn get_default_verify_paths() -> (String, String, String, String) {
-        macro_rules! convert {
-            ($f:ident) => {
-                CStr::from_ptr(sys::$f()).to_string_lossy().into_owned()
-            };
-        }
-        unsafe {
-            (
-                convert!(X509_get_default_cert_file_env),
-                convert!(X509_get_default_cert_file),
-                convert!(X509_get_default_cert_dir_env),
-                convert!(X509_get_default_cert_dir),
-            )
-        }
+    fn get_default_verify_paths(
+        vm: &VirtualMachine,
+    ) -> PyResult<(&'static str, PyObjectRef, &'static str, PyObjectRef)> {
+        let cert_file_env = unsafe { CStr::from_ptr(sys::X509_get_default_cert_file_env()) }
+            .to_str()
+            .unwrap();
+        let cert_dir_env = unsafe { CStr::from_ptr(sys::X509_get_default_cert_dir_env()) }
+            .to_str()
+            .unwrap();
+        let (cert_file, cert_dir) = get_cert_file_dir();
+        let cert_file = OsPath::new_str(cert_file).filename(vm)?;
+        let cert_dir = OsPath::new_str(cert_dir).filename(vm)?;
+        Ok((cert_file_env, cert_file, cert_dir_env, cert_dir))
     }
 
     #[pyfunction(name = "RAND_status")]
@@ -564,7 +601,7 @@ mod _ssl {
                     return Err(vm.new_value_error(
                         "Cannot set verify_mode to CERT_NONE when check_hostname is enabled."
                             .to_owned(),
-                    ))
+                    ));
                 }
                 CertRequirements::None => SslVerifyMode::NONE,
                 CertRequirements::Optional => SslVerifyMode::PEER,
@@ -590,9 +627,18 @@ mod _ssl {
 
         #[pymethod]
         fn set_default_verify_paths(&self, vm: &VirtualMachine) -> PyResult<()> {
-            self.builder()
-                .set_default_verify_paths()
-                .map_err(|e| convert_openssl_error(vm, e))
+            cfg_if::cfg_if! {
+                if #[cfg(openssl_vendored)] {
+                    let (cert_file, cert_dir) = get_cert_file_dir();
+                    self.builder()
+                        .load_verify_locations(Some(cert_file), Some(cert_dir))
+                        .map_err(|e| convert_openssl_error(vm, e))
+                } else {
+                    self.builder()
+                        .set_default_verify_paths()
+                        .map_err(|e| convert_openssl_error(vm, e))
+                }
+            }
         }
 
         #[pymethod]
@@ -612,7 +658,11 @@ mod _ssl {
                     Ok(pbuf.to_vec())
                 })?;
                 ctx.set_alpn_select_callback(move |_, client| {
-                    ssl::select_next_proto(&server, client).ok_or(ssl::AlpnError::NOACK)
+                    let proto =
+                        ssl::select_next_proto(&server, client).ok_or(ssl::AlpnError::NOACK)?;
+                    let pos = memchr::memmem::find(client, proto)
+                        .expect("selected alpn proto should be present in client protos");
+                    Ok(&client[pos..proto.len()])
                 });
                 Ok(())
             }
@@ -635,6 +685,12 @@ mod _ssl {
                     vm.new_type_error("cafile, capath and cadata cannot be all omitted".to_owned())
                 );
             }
+            if let Some(cafile) = &args.cafile {
+                cafile.ensure_no_nul(vm)?
+            }
+            if let Some(capath) = &args.capath {
+                capath.ensure_no_nul(vm)?
+            }
 
             #[cold]
             fn invalid_cadata(vm: &VirtualMachine) -> PyBaseExceptionRef {
@@ -642,6 +698,8 @@ mod _ssl {
                     "cadata should be an ASCII string or a bytes-like object".to_owned(),
                 )
             }
+
+            let mut ctx = self.builder();
 
             // validate cadata type and load cadata
             if let Some(cadata) = args.cadata {
@@ -655,7 +713,6 @@ mod _ssl {
                     Either::B(b) => b.with_ref(x509_stack_from_der),
                 };
                 let certs = certs.map_err(|e| convert_openssl_error(vm, e))?;
-                let mut ctx = self.builder();
                 let store = ctx.cert_store_mut();
                 for cert in certs {
                     store
@@ -665,29 +722,11 @@ mod _ssl {
             }
 
             if args.cafile.is_some() || args.capath.is_some() {
-                let cafile = args.cafile.map(|s| s.to_cstring(vm)).transpose()?;
-                let capath = args.capath.map(|s| s.to_cstring(vm)).transpose()?;
-                let ret = unsafe {
-                    let ctx = self.ctx.write();
-                    sys::SSL_CTX_load_verify_locations(
-                        ctx.as_ptr(),
-                        cafile
-                            .as_ref()
-                            .map_or_else(std::ptr::null, |cs| cs.as_ptr()),
-                        capath
-                            .as_ref()
-                            .map_or_else(std::ptr::null, |cs| cs.as_ptr()),
-                    )
-                };
-                if ret != 1 {
-                    let errno = crate::common::os::last_posix_errno();
-                    let err = if errno != 0 {
-                        crate::vm::stdlib::os::errno_err(vm)
-                    } else {
-                        convert_openssl_error(vm, ErrorStack::get())
-                    };
-                    return Err(err);
-                }
+                ctx.load_verify_locations(
+                    args.cafile.as_ref().map(|s| s.as_str().as_ref()),
+                    args.capath.as_ref().map(|s| s.as_str().as_ref()),
+                )
+                .map_err(|e| convert_openssl_error(vm, e))?;
             }
 
             Ok(())
@@ -967,11 +1006,7 @@ mod _ssl {
         #[pymethod]
         fn version(&self) -> Option<&'static str> {
             let v = self.stream.read().ssl().version_str();
-            if v == "unknown" {
-                None
-            } else {
-                Some(v)
-            }
+            if v == "unknown" { None } else { Some(v) }
         }
 
         #[pymethod]
@@ -1019,7 +1054,7 @@ mod _ssl {
                         return Err(socket::timeout_error_msg(
                             vm,
                             "The handshake operation timed out".to_owned(),
-                        ))
+                        ));
                     }
                     SelectRet::Closed => return Err(socket_closed_error(vm)),
                     SelectRet::Nonblocking => {}
@@ -1045,7 +1080,7 @@ mod _ssl {
                     return Err(socket::timeout_error_msg(
                         vm,
                         "The write operation timed out".to_owned(),
-                    ))
+                    ));
                 }
                 SelectRet::Closed => return Err(socket_closed_error(vm)),
                 _ => {}
@@ -1061,7 +1096,7 @@ mod _ssl {
                         return Err(socket::timeout_error_msg(
                             vm,
                             "The write operation timed out".to_owned(),
-                        ))
+                        ));
                     }
                     SelectRet::Closed => return Err(socket_closed_error(vm)),
                     SelectRet::Nonblocking => {}
@@ -1113,7 +1148,7 @@ mod _ssl {
                         return Err(socket::timeout_error_msg(
                             vm,
                             "The read operation timed out".to_owned(),
-                        ))
+                        ));
                     }
                     SelectRet::Nonblocking => {}
                     _ => {
@@ -1346,13 +1381,13 @@ mod _ssl {
     #[cfg(target_os = "android")]
     mod android {
         use super::convert_openssl_error;
-        use crate::vm::{builtins::PyBaseExceptionRef, VirtualMachine};
+        use crate::vm::{VirtualMachine, builtins::PyBaseExceptionRef};
         use openssl::{
             ssl::SslContextBuilder,
-            x509::{store::X509StoreBuilder, X509},
+            x509::{X509, store::X509StoreBuilder},
         };
         use std::{
-            fs::{read_dir, File},
+            fs::{File, read_dir},
             io::Read,
             path::Path,
         };
@@ -1426,8 +1461,8 @@ mod windows {}
 mod ossl101 {
     #[pyattr]
     use openssl_sys::{
-        SSL_OP_NO_TLSv1_1 as OP_NO_TLSv1_1, SSL_OP_NO_TLSv1_2 as OP_NO_TLSv1_2,
-        SSL_OP_NO_COMPRESSION as OP_NO_COMPRESSION,
+        SSL_OP_NO_COMPRESSION as OP_NO_COMPRESSION, SSL_OP_NO_TLSv1_1 as OP_NO_TLSv1_1,
+        SSL_OP_NO_TLSv1_2 as OP_NO_TLSv1_2,
     };
 }
 
@@ -1445,15 +1480,15 @@ mod windows {
     use crate::{
         common::ascii,
         vm::{
+            PyObjectRef, PyPayload, PyResult, VirtualMachine,
             builtins::{PyFrozenSet, PyStrRef},
             convert::ToPyException,
-            PyObjectRef, PyPayload, PyResult, VirtualMachine,
         },
     };
 
     #[pyfunction]
     fn enum_certificates(store_name: PyStrRef, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
-        use schannel::{cert_context::ValidUses, cert_store::CertStore, RawPointer};
+        use schannel::{RawPointer, cert_context::ValidUses, cert_store::CertStore};
         use windows_sys::Win32::Security::Cryptography;
 
         // TODO: check every store for it, not just 2 of them:

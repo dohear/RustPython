@@ -1,4 +1,4 @@
-use crate::{builtins::PyModule, PyRef, VirtualMachine};
+use crate::{PyRef, VirtualMachine, builtins::PyModule};
 
 pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
     let module = _signal::make_module(vm);
@@ -13,10 +13,10 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 pub(crate) mod _signal {
     #[cfg(any(unix, windows))]
     use crate::{
-        convert::{IntoPyException, TryFromBorrowedObject},
         Py,
+        convert::{IntoPyException, TryFromBorrowedObject},
     };
-    use crate::{signal, PyObjectRef, PyResult, VirtualMachine};
+    use crate::{PyObjectRef, PyResult, VirtualMachine, signal};
     use std::sync::atomic::{self, Ordering};
 
     #[cfg(any(unix, windows))]
@@ -78,7 +78,7 @@ pub(crate) mod _signal {
     pub const SIG_ERR: sighandler_t = -1 as _;
 
     #[cfg(all(unix, not(target_os = "redox")))]
-    extern "C" {
+    unsafe extern "C" {
         fn siginterrupt(sig: i32, flag: i32) -> i32;
     }
 

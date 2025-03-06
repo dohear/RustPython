@@ -1,17 +1,16 @@
 use super::Diagnostic;
 use crate::util::{
-    format_doc, pyclass_ident_and_attrs, pyexception_ident_and_attrs, text_signature,
-    ClassItemMeta, ContentItem, ContentItemInner, ErrorVec, ExceptionItemMeta, ItemMeta,
-    ItemMetaInner, ItemNursery, SimpleItemMeta, ALL_ALLOWED_NAMES,
+    ALL_ALLOWED_NAMES, ClassItemMeta, ContentItem, ContentItemInner, ErrorVec, ExceptionItemMeta,
+    ItemMeta, ItemMetaInner, ItemNursery, SimpleItemMeta, format_doc, pyclass_ident_and_attrs,
+    pyexception_ident_and_attrs, text_signature,
 };
 use proc_macro2::{Delimiter, Group, Span, TokenStream, TokenTree};
-use quote::{quote, quote_spanned, ToTokens};
+use quote::{ToTokens, quote, quote_spanned};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use syn::{
-    parse_quote, spanned::Spanned, Attribute, AttributeArgs, Ident, Item, Meta, NestedMeta, Result,
-};
+use syn::{Attribute, Ident, Item, Result, parse_quote, spanned::Spanned};
 use syn_ext::ext::*;
+use syn_ext::types::*;
 
 #[derive(Copy, Clone, Debug)]
 enum AttrName {
@@ -26,7 +25,7 @@ enum AttrName {
 }
 
 impl std::fmt::Display for AttrName {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Method => "pymethod",
             Self::ClassMethod => "pyclassmethod",
@@ -98,7 +97,7 @@ fn extract_items_into_context<'a, Item>(
     context.errors.ok_or_push(context.member_items.validate());
 }
 
-pub(crate) fn impl_pyclass_impl(attr: AttributeArgs, item: Item) -> Result<TokenStream> {
+pub(crate) fn impl_pyclass_impl(attr: PunctuatedNestedMeta, item: Item) -> Result<TokenStream> {
     let mut context = ImplContext::default();
     let mut tokens = match item {
         Item::Impl(mut imp) => {
@@ -127,7 +126,7 @@ pub(crate) fn impl_pyclass_impl(attr: AttributeArgs, item: Item) -> Result<Token
                                         return Err(syn::Error::new_spanned(
                                             segment,
                                             "Py{Ref}<T> is expected but Py{Ref}<?> is found",
-                                        ))
+                                        ));
                                     }
                                 }
                             }
@@ -135,7 +134,7 @@ pub(crate) fn impl_pyclass_impl(attr: AttributeArgs, item: Item) -> Result<Token
                                 return Err(syn::Error::new_spanned(
                                     segment,
                                     "Py{Ref}<T> is expected but Py{Ref}? is found",
-                                ))
+                                ));
                             }
                         }
                     } else {
@@ -153,7 +152,7 @@ pub(crate) fn impl_pyclass_impl(attr: AttributeArgs, item: Item) -> Result<Token
                     return Err(syn::Error::new_spanned(
                         imp.self_ty,
                         "PyImpl can only be implemented for Py{Ref}<T> or T",
-                    ))
+                    ));
                 }
             };
 
@@ -235,9 +234,7 @@ pub(crate) fn impl_pyclass_impl(attr: AttributeArgs, item: Item) -> Result<Token
             let mut has_extend_slots = false;
             for item in &trai.items {
                 let has = match item {
-                    syn::TraitItem::Method(method) => {
-                        &method.sig.ident.to_string() == "extend_slots"
-                    }
+                    syn::TraitItem::Fn(item) => item.sig.ident == "extend_slots",
                     _ => false,
                 };
                 if has {
@@ -344,7 +341,7 @@ fn generate_class_def(
     };
     let basicsize = quote!(std::mem::size_of::<#ident>());
     let is_pystruct = attrs.iter().any(|attr| {
-        attr.path.is_ident("derive")
+        attr.path().is_ident("derive")
             && if let Ok(Meta::List(l)) = attr.parse_meta() {
                 l.nested
                     .into_iter()
@@ -418,7 +415,7 @@ fn generate_class_def(
     Ok(tokens)
 }
 
-pub(crate) fn impl_pyclass(attr: AttributeArgs, item: Item) -> Result<TokenStream> {
+pub(crate) fn impl_pyclass(attr: PunctuatedNestedMeta, item: Item) -> Result<TokenStream> {
     if matches!(item, syn::Item::Use(_)) {
         return Ok(quote!(#item));
     }
@@ -534,7 +531,7 @@ pub(crate) fn impl_pyclass(attr: AttributeArgs, item: Item) -> Result<TokenStrea
 /// But, inside `macro_rules` we don't have an opportunity
 /// to add non-literal attributes to `pyclass`.
 /// That's why we have to use this proxy.
-pub(crate) fn impl_pyexception(attr: AttributeArgs, item: Item) -> Result<TokenStream> {
+pub(crate) fn impl_pyexception(attr: PunctuatedNestedMeta, item: Item) -> Result<TokenStream> {
     let (ident, _attrs) = pyexception_ident_and_attrs(&item)?;
     let fake_ident = Ident::new("pyclass", item.span());
     let class_meta = ExceptionItemMeta::from_nested(ident.clone(), fake_ident, attr.into_iter())?;
@@ -573,7 +570,7 @@ pub(crate) fn impl_pyexception(attr: AttributeArgs, item: Item) -> Result<TokenS
     Ok(ret)
 }
 
-pub(crate) fn impl_pyexception_impl(attr: AttributeArgs, item: Item) -> Result<TokenStream> {
+pub(crate) fn impl_pyexception_impl(attr: PunctuatedNestedMeta, item: Item) -> Result<TokenStream> {
     let Item::Impl(imp) = item else {
         return Ok(item.into_token_stream());
     };
@@ -1229,15 +1226,18 @@ impl MethodItemMeta {
         let inner = self.inner();
         let name = inner._optional_str("name")?;
         let magic = inner._bool("magic")?;
+        if magic && name.is_some() {
+            bail_span!(
+                &inner.meta_ident,
+                "A #[{}] method cannot be magic and have a specified name, choose one.",
+                inner.meta_name()
+            );
+        }
         Ok(if let Some(name) = name {
             name
         } else {
             let name = inner.item_name();
-            if magic {
-                format!("__{name}__")
-            } else {
-                name
-            }
+            if magic { format!("__{name}__") } else { name }
         })
     }
 }
@@ -1304,11 +1304,7 @@ impl GetSetItemMeta {
                 GetSetItemKind::Set => extract_prefix_name("set_", "setter")?,
                 GetSetItemKind::Delete => extract_prefix_name("del_", "deleter")?,
             };
-            if magic {
-                format!("__{name}__")
-            } else {
-                name
-            }
+            if magic { format!("__{name}__") } else { name }
         };
         Ok((py_name, kind))
     }
@@ -1447,7 +1443,7 @@ struct ExtractedImplAttrs {
     with_slots: TokenStream,
 }
 
-fn extract_impl_attrs(attr: AttributeArgs, item: &Ident) -> Result<ExtractedImplAttrs> {
+fn extract_impl_attrs(attr: PunctuatedNestedMeta, item: &Ident) -> Result<ExtractedImplAttrs> {
     let mut withs = Vec::new();
     let mut with_method_defs = Vec::new();
     let mut with_slots = Vec::new();
@@ -1467,7 +1463,7 @@ fn extract_impl_attrs(attr: AttributeArgs, item: &Ident) -> Result<ExtractedImpl
     let mut has_constructor = false;
     for attr in attr {
         match attr {
-            NestedMeta::Meta(Meta::List(syn::MetaList { path, nested, .. })) => {
+            NestedMeta::Meta(Meta::List(MetaList { path, nested, .. })) => {
                 if path.is_ident("with") {
                     for meta in nested {
                         let NestedMeta::Meta(Meta::Path(path)) = &meta else {
@@ -1484,7 +1480,10 @@ fn extract_impl_attrs(attr: AttributeArgs, item: &Ident) -> Result<ExtractedImpl
                             )
                         } else {
                             if path.is_ident("DefaultConstructor") {
-                                bail_span!(meta, "Try `#[pyclass(with(Constructor, ...))]` instead of `#[pyclass(with(DefaultConstructor, ...))]`. DefaultConstructor implicitly implements Constructor.")
+                                bail_span!(
+                                    meta,
+                                    "Try `#[pyclass(with(Constructor, ...))]` instead of `#[pyclass(with(DefaultConstructor, ...))]`. DefaultConstructor implicitly implements Constructor."
+                                )
                             }
                             if path.is_ident("Constructor") || path.is_ident("Unconstructible") {
                                 has_constructor = true;
@@ -1523,12 +1522,16 @@ fn extract_impl_attrs(attr: AttributeArgs, item: &Ident) -> Result<ExtractedImpl
                     bail_span!(path, "Unknown pyimpl attribute")
                 }
             }
-            NestedMeta::Meta(Meta::NameValue(syn::MetaNameValue { path, lit, .. })) => {
+            NestedMeta::Meta(Meta::NameValue(syn::MetaNameValue { path, value, .. })) => {
                 if path.is_ident("payload") {
-                    if let syn::Lit::Str(lit) = lit {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(lit),
+                        ..
+                    }) = value
+                    {
                         payload = Some(Ident::new(&lit.value(), lit.span()));
                     } else {
-                        bail_span!(lit, "payload must be a string literal")
+                        bail_span!(value, "payload must be a string literal")
                     }
                 } else {
                     bail_span!(path, "Unknown pyimpl attribute")

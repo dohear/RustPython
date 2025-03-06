@@ -1,9 +1,9 @@
 use crate::{
+    AsObject, Py, PyPayload, PyResult, VirtualMachine,
     builtins::{PyBaseExceptionRef, PyModule, PySet},
     common::crt_fd::Fd,
     convert::ToPyException,
     function::{ArgumentError, FromArgs, FuncArgs},
-    AsObject, Py, PyPayload, PyResult, VirtualMachine,
 };
 use std::{ffi, fs, io, path::Path};
 
@@ -125,8 +125,9 @@ fn bytes_as_osstr<'a>(b: &'a [u8], vm: &VirtualMachine) -> PyResult<&'a ffi::OsS
 
 #[pymodule(sub)]
 pub(super) mod _os {
-    use super::{errno_err, DirFd, FollowSymlinks, SupportFunc};
+    use super::{DirFd, FollowSymlinks, SupportFunc, errno_err};
     use crate::{
+        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
         builtins::{
             PyBytesRef, PyGenericAlias, PyIntRef, PyStrRef, PyTuple, PyTupleRef, PyTypeRef,
         },
@@ -144,7 +145,6 @@ pub(super) mod _os {
         types::{IterNext, Iterable, PyStructSequence, Representable, SelfIter},
         utils::ToCString,
         vm::VirtualMachine,
-        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
@@ -303,11 +303,7 @@ pub(super) mod _os {
         #[cfg(target_os = "redox")]
         let [] = dir_fd.0;
         let res = unsafe { libc::mkdir(path.as_ptr(), mode as _) };
-        if res < 0 {
-            Err(errno_err(vm))
-        } else {
-            Ok(())
-        }
+        if res < 0 { Err(errno_err(vm)) } else { Ok(()) }
     }
 
     #[pyfunction]
@@ -380,8 +376,8 @@ pub(super) mod _os {
 
     fn env_bytes_as_bytes(obj: &Either<PyStrRef, PyBytesRef>) -> &[u8] {
         match obj {
-            Either::A(ref s) => s.as_str().as_bytes(),
-            Either::B(ref b) => b.as_bytes(),
+            Either::A(s) => s.as_str().as_bytes(),
+            Either::B(b) => b.as_bytes(),
         }
     }
 
@@ -401,7 +397,8 @@ pub(super) mod _os {
         }
         let key = super::bytes_as_osstr(key, vm)?;
         let value = super::bytes_as_osstr(value, vm)?;
-        env::set_var(key, value);
+        // SAFETY: requirements forwarded from the caller
+        unsafe { env::set_var(key, value) };
         Ok(())
     }
 
@@ -421,7 +418,8 @@ pub(super) mod _os {
             ));
         }
         let key = super::bytes_as_osstr(key, vm)?;
-        env::remove_var(key);
+        // SAFETY: requirements forwarded from the caller
+        unsafe { env::remove_var(key) };
         Ok(())
     }
 
@@ -966,7 +964,7 @@ pub(super) mod _os {
 
     #[pyfunction]
     fn abort() {
-        extern "C" {
+        unsafe extern "C" {
             fn abort();
         }
         unsafe { abort() }
@@ -978,10 +976,7 @@ pub(super) mod _os {
             return Err(vm.new_value_error("negative argument not allowed".to_owned()));
         }
         let mut buf = vec![0u8; size as usize];
-        getrandom::getrandom(&mut buf).map_err(|e| match e.raw_os_error() {
-            Some(errno) => io::Error::from_raw_os_error(errno).into_pyexception(vm),
-            None => vm.new_os_error("Getting random failed".to_owned()),
-        })?;
+        getrandom::fill(&mut buf).map_err(|e| io::Error::from(e).into_pyexception(vm))?;
         Ok(buf)
     }
 
@@ -1012,11 +1007,7 @@ pub(super) mod _os {
                 std::mem::transmute::<[i32; 2], i64>(distance_to_move)
             }
         };
-        if res < 0 {
-            Err(errno_err(vm))
-        } else {
-            Ok(res)
-        }
+        if res < 0 { Err(errno_err(vm)) } else { Ok(res) }
     }
 
     #[pyfunction]
@@ -1101,7 +1092,7 @@ pub(super) mod _os {
             (Some(_), Some(_)) => {
                 return Err(vm.new_value_error(
                     "utime: you may specify either 'times' or 'ns' but not both".to_owned(),
-                ))
+                ));
             }
         };
         utime_impl(args.path, acc, modif, args.dir_fd, args.follow_symlinks, vm)
@@ -1139,11 +1130,7 @@ pub(super) mod _os {
                         },
                     )
                 };
-                if ret < 0 {
-                    Err(errno_err(vm))
-                } else {
-                    Ok(())
-                }
+                if ret < 0 { Err(errno_err(vm)) } else { Ok(()) }
             }
             #[cfg(target_os = "redox")]
             {

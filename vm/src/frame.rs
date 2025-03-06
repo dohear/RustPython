@@ -1,11 +1,12 @@
 use crate::common::{boxvec::BoxVec, lock::PyMutex};
 use crate::{
+    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
     builtins::{
+        PyBaseExceptionRef, PyCode, PyCoroutine, PyDict, PyDictRef, PyGenerator, PyList, PySet,
+        PySlice, PyStr, PyStrInterned, PyStrRef, PyTraceback, PyType,
         asyncgenerator::PyAsyncGenWrappedValue,
         function::{PyCell, PyCellRef, PyFunction},
         tuple::{PyTuple, PyTupleRef, PyTupleTyped},
-        PyBaseExceptionRef, PyCode, PyCoroutine, PyDict, PyDictRef, PyGenerator, PyList, PySet,
-        PySlice, PyStr, PyStrInterned, PyStrRef, PyTraceback, PyType,
     },
     bytecode,
     convert::{IntoObject, ToPyResult},
@@ -17,7 +18,6 @@ use crate::{
     source_code::SourceLocation,
     stdlib::{builtins, typing::_typing},
     vm::{Context, PyMethod},
-    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -221,7 +221,7 @@ impl Frame {
 
 impl Py<Frame> {
     #[inline(always)]
-    fn with_exec<R>(&self, f: impl FnOnce(ExecutingFrame) -> R) -> R {
+    fn with_exec<R>(&self, f: impl FnOnce(ExecutingFrame<'_>) -> R) -> R {
         let mut state = self.state.lock();
         let exec = ExecutingFrame {
             code: &self.code,
@@ -277,15 +277,17 @@ impl Py<Frame> {
     }
 
     pub fn next_external_frame(&self, vm: &VirtualMachine) -> Option<FrameRef> {
-        self.f_back(vm).map(|mut back| loop {
-            back = if let Some(back) = back.to_owned().f_back(vm) {
-                back
-            } else {
-                break back;
-            };
+        self.f_back(vm).map(|mut back| {
+            loop {
+                back = if let Some(back) = back.to_owned().f_back(vm) {
+                    back
+                } else {
+                    break back;
+                };
 
-            if !back.is_internal_frame() {
-                break back;
+                if !back.is_internal_frame() {
+                    break back;
+                }
             }
         })
     }
@@ -306,7 +308,7 @@ struct ExecutingFrame<'a> {
 }
 
 impl fmt::Debug for ExecutingFrame<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExecutingFrame")
             .field("code", self.code)
             // .field("scope", self.scope)
@@ -369,7 +371,7 @@ impl ExecutingFrame<'_> {
                 Err(exception) => {
                     #[cold]
                     fn handle_exception(
-                        frame: &mut ExecutingFrame,
+                        frame: &mut ExecutingFrame<'_>,
                         exception: PyBaseExceptionRef,
                         idx: usize,
                         vm: &VirtualMachine,
@@ -426,19 +428,19 @@ impl ExecutingFrame<'_> {
         exc_val: PyObjectRef,
         exc_tb: PyObjectRef,
     ) -> PyResult<ExecutionResult> {
-        if let Some(gen) = self.yield_from_target() {
+        if let Some(jen) = self.yield_from_target() {
             // borrow checker shenanigans - we only need to use exc_type/val/tb if the following
             // variable is Some
-            let thrower = if let Some(coro) = self.builtin_coro(gen) {
+            let thrower = if let Some(coro) = self.builtin_coro(jen) {
                 Some(Either::A(coro))
             } else {
-                vm.get_attribute_opt(gen.to_owned(), "throw")?
+                vm.get_attribute_opt(jen.to_owned(), "throw")?
                     .map(Either::B)
             };
             if let Some(thrower) = thrower {
                 let ret = match thrower {
                     Either::A(coro) => coro
-                        .throw(gen, exc_type, exc_val, exc_tb, vm)
+                        .throw(jen, exc_type, exc_val, exc_tb, vm)
                         .to_pyresult(vm), // FIXME:
                     Either::B(meth) => meth.call((exc_type, exc_val, exc_tb), vm),
                 };
@@ -638,7 +640,7 @@ impl ExecutingFrame<'_> {
                 match res {
                     Ok(()) => {}
                     Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => {
-                        return Err(name_error(name, vm))
+                        return Err(name_error(name, vm));
                     }
                     Err(e) => return Err(e),
                 }
@@ -649,7 +651,7 @@ impl ExecutingFrame<'_> {
                 match self.globals.del_item(name, vm) {
                     Ok(()) => {}
                     Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => {
-                        return Err(name_error(name, vm))
+                        return Err(name_error(name, vm));
                     }
                     Err(e) => return Err(e),
                 }
@@ -1568,16 +1570,16 @@ impl ExecutingFrame<'_> {
 
     fn _send(
         &self,
-        gen: &PyObject,
+        jen: &PyObject,
         val: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<PyIterReturn> {
-        match self.builtin_coro(gen) {
-            Some(coro) => coro.send(gen, val, vm),
+        match self.builtin_coro(jen) {
+            Some(coro) => coro.send(jen, val, vm),
             // FIXME: turn return type to PyResult<PyIterReturn> then ExecutionResult will be simplified
-            None if vm.is_none(&val) => PyIter::new(gen).next(vm),
+            None if vm.is_none(&val) => PyIter::new(jen).next(vm),
             None => {
-                let meth = gen.get_attr("send", vm)?;
+                let meth = jen.get_attr("send", vm)?;
                 PyIterReturn::from_pyresult(meth.call((val,), vm), vm)
             }
         }
@@ -2079,7 +2081,7 @@ impl ExecutingFrame<'_> {
         }
     }
 
-    fn pop_multiple(&mut self, count: usize) -> crate::common::boxvec::Drain<PyObjectRef> {
+    fn pop_multiple(&mut self, count: usize) -> crate::common::boxvec::Drain<'_, PyObjectRef> {
         let stack_len = self.state.stack.len();
         self.state.stack.drain(stack_len - count..)
     }
@@ -2117,7 +2119,7 @@ impl ExecutingFrame<'_> {
 }
 
 impl fmt::Debug for Frame {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.lock();
         let stack_str = state.stack.iter().fold(String::new(), |mut s, elem| {
             if elem.payload_is::<Frame>() {

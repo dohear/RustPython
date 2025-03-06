@@ -1,4 +1,4 @@
-use crate::{builtins::PyModule, PyRef, VirtualMachine};
+use crate::{PyRef, VirtualMachine, builtins::PyModule};
 
 pub use module::raw_set_handle_inheritable;
 
@@ -11,13 +11,13 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 #[pymodule(name = "nt", with(super::os::_os))]
 pub(crate) mod module {
     use crate::{
+        PyResult, TryFromObject, VirtualMachine,
         builtins::{PyDictRef, PyListRef, PyStrRef, PyTupleRef},
         common::{crt_fd::Fd, os::last_os_error, suppress_iph},
         convert::ToPyException,
         function::{Either, OptionalArg},
         ospath::OsPath,
-        stdlib::os::{errno_err, DirFd, FollowSymlinks, SupportFunc, TargetIsDirectory, _os},
-        PyResult, TryFromObject, VirtualMachine,
+        stdlib::os::{_os, DirFd, FollowSymlinks, SupportFunc, TargetIsDirectory, errno_err},
     };
     use libc::intptr_t;
     use std::{
@@ -41,6 +41,12 @@ pub(crate) mod module {
             && (mode & 2 == 0
                 || attr & FileSystem::FILE_ATTRIBUTE_READONLY == 0
                 || attr & FileSystem::FILE_ATTRIBUTE_DIRECTORY != 0))
+    }
+
+    #[pyfunction]
+    pub(super) fn _supports_virtual_terminal() -> PyResult<bool> {
+        // TODO: implement this
+        Ok(true)
     }
 
     #[derive(FromArgs)]
@@ -110,7 +116,7 @@ pub(crate) mod module {
 
     // cwait is available on MSVC only (according to CPython)
     #[cfg(target_env = "msvc")]
-    extern "C" {
+    unsafe extern "C" {
         fn _cwait(termstat: *mut i32, procHandle: intptr_t, action: i32) -> intptr_t;
     }
 
@@ -188,7 +194,7 @@ pub(crate) mod module {
     }
 
     #[cfg(target_env = "msvc")]
-    extern "C" {
+    unsafe extern "C" {
         fn _wexecv(cmdname: *const u16, argv: *const *const u16) -> intptr_t;
     }
 

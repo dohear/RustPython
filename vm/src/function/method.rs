@@ -1,11 +1,11 @@
 use crate::{
+    Context, Py, PyObjectRef, PyPayload, PyRef, VirtualMachine,
     builtins::{
+        PyType,
         builtin_func::{PyNativeFunction, PyNativeMethod},
         descriptor::PyMethodDescriptor,
-        PyType,
     },
     function::{IntoPyNativeFn, PyNativeFn},
-    Context, Py, PyObjectRef, PyPayload, PyRef, VirtualMachine,
 };
 
 bitflags::bitflags! {
@@ -274,7 +274,7 @@ impl HeapMethodDef {
 
 impl Py<HeapMethodDef> {
     pub(crate) unsafe fn method(&self) -> &'static PyMethodDef {
-        &*(&self.method as *const _)
+        unsafe { &*(&self.method as *const _) }
     }
 
     pub fn build_function(&self, vm: &VirtualMachine) -> PyRef<PyNativeFunction> {

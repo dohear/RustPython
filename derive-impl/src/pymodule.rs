@@ -1,14 +1,15 @@
 use crate::error::Diagnostic;
 use crate::util::{
-    format_doc, iter_use_idents, pyclass_ident_and_attrs, text_signature, AttrItemMeta,
-    AttributeExt, ClassItemMeta, ContentItem, ContentItemInner, ErrorVec, ItemMeta, ItemNursery,
-    ModuleItemMeta, SimpleItemMeta, ALL_ALLOWED_NAMES,
+    ALL_ALLOWED_NAMES, AttrItemMeta, AttributeExt, ClassItemMeta, ContentItem, ContentItemInner,
+    ErrorVec, ItemMeta, ItemNursery, ModuleItemMeta, SimpleItemMeta, format_doc, iter_use_idents,
+    pyclass_ident_and_attrs, text_signature,
 };
 use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
-use quote::{quote, quote_spanned, ToTokens};
+use quote::{ToTokens, quote, quote_spanned};
 use std::{collections::HashSet, str::FromStr};
-use syn::{parse_quote, spanned::Spanned, Attribute, AttributeArgs, Ident, Item, Result};
+use syn::{Attribute, Ident, Item, Result, parse_quote, spanned::Spanned};
 use syn_ext::ext::*;
+use syn_ext::types::PunctuatedNestedMeta;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AttrName {
@@ -18,7 +19,7 @@ enum AttrName {
 }
 
 impl std::fmt::Display for AttrName {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Function => "pyfunction",
             Self::Attr => "pyattr",
@@ -51,7 +52,7 @@ struct ModuleContext {
     errors: Vec<syn::Error>,
 }
 
-pub fn impl_pymodule(attr: AttributeArgs, module_item: Item) -> Result<TokenStream> {
+pub fn impl_pymodule(attr: PunctuatedNestedMeta, module_item: Item) -> Result<TokenStream> {
     let (doc, mut module_item) = match module_item {
         Item::Mod(m) => (m.attrs.doc(), m),
         other => bail_span!(other, "#[pymodule] can only be on a full module"),
@@ -687,7 +688,7 @@ impl ModuleItem for AttributeItem {
             other => {
                 return Err(
                     self.new_syn_error(other.span(), "can only be on a function, const and use")
-                )
+                );
             }
         };
 
@@ -727,7 +728,7 @@ impl ModuleItem for AttributeItem {
             (
                 quote_spanned! { ident.span() => {
                     #let_obj
-                    for name in [(#(#names,)*)] {
+                    for name in [#(#names),*] {
                         vm.__module_set_attr(module, vm.ctx.intern_str(name), obj.clone()).unwrap();
                     }
                 }},

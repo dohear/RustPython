@@ -2,7 +2,7 @@
 
 // See also:
 // https://docs.python.org/3/library/time.html
-use crate::{builtins::PyModule, PyRef, VirtualMachine};
+use crate::{PyRef, VirtualMachine, builtins::PyModule};
 
 pub use decl::time;
 
@@ -17,7 +17,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 
 #[cfg(not(target_env = "msvc"))]
 #[cfg(not(target_arch = "wasm32"))]
-extern "C" {
+unsafe extern "C" {
     #[cfg(not(target_os = "freebsd"))]
     #[link_name = "daylight"]
     static c_daylight: std::ffi::c_int;
@@ -33,16 +33,19 @@ extern "C" {
 #[pymodule(name = "time", with(platform))]
 mod decl {
     use crate::{
+        PyObjectRef, PyResult, TryFromObject, VirtualMachine,
         builtins::{PyStrRef, PyTypeRef},
         function::{Either, FuncArgs, OptionalArg},
         types::PyStructSequence,
-        PyObjectRef, PyResult, TryFromObject, VirtualMachine,
     };
     use chrono::{
-        naive::{NaiveDate, NaiveDateTime, NaiveTime},
         DateTime, Datelike, Timelike,
+        naive::{NaiveDate, NaiveDateTime, NaiveTime},
     };
     use std::time::Duration;
+    #[cfg(target_env = "msvc")]
+    #[cfg(not(target_arch = "wasm32"))]
+    use windows::Win32::System::Time;
 
     #[allow(dead_code)]
     pub(super) const SEC_TO_MS: i64 = 1000;
@@ -152,6 +155,15 @@ mod decl {
         Ok(get_perf_time(vm)?.as_nanos())
     }
 
+    #[cfg(target_env = "msvc")]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn get_tz_info() -> Time::TIME_ZONE_INFORMATION {
+        let mut info = Time::TIME_ZONE_INFORMATION::default();
+        let info_ptr = &mut info as *mut Time::TIME_ZONE_INFORMATION;
+        let _ = unsafe { Time::GetTimeZoneInformation(info_ptr) };
+        info
+    }
+
     // #[pyfunction]
     // fn tzset() {
     //     unsafe { super::_tzset() };
@@ -164,12 +176,30 @@ mod decl {
         unsafe { super::c_timezone }
     }
 
+    #[cfg(target_env = "msvc")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[pyattr]
+    fn timezone(_vm: &VirtualMachine) -> i32 {
+        let info = get_tz_info();
+        // https://users.rust-lang.org/t/accessing-tzname-and-similar-constants-in-windows/125771/3
+        (info.Bias + info.StandardBias) * 60
+    }
+
     #[cfg(not(target_os = "freebsd"))]
     #[cfg(not(target_env = "msvc"))]
     #[cfg(not(target_arch = "wasm32"))]
     #[pyattr]
     fn daylight(_vm: &VirtualMachine) -> std::ffi::c_int {
         unsafe { super::c_daylight }
+    }
+
+    #[cfg(target_env = "msvc")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[pyattr]
+    fn daylight(_vm: &VirtualMachine) -> i32 {
+        let info = get_tz_info();
+        // https://users.rust-lang.org/t/accessing-tzname-and-similar-constants-in-windows/125771/3
+        (info.StandardBias != info.DaylightBias) as i32
     }
 
     #[cfg(not(target_env = "msvc"))]
@@ -179,9 +209,27 @@ mod decl {
         use crate::builtins::tuple::IntoPyTuple;
 
         unsafe fn to_str(s: *const std::ffi::c_char) -> String {
-            std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned()
+            unsafe { std::ffi::CStr::from_ptr(s) }
+                .to_string_lossy()
+                .into_owned()
         }
         unsafe { (to_str(super::c_tzname[0]), to_str(super::c_tzname[1])) }.into_pytuple(vm)
+    }
+
+    #[cfg(target_env = "msvc")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[pyattr]
+    fn tzname(vm: &VirtualMachine) -> crate::builtins::PyTupleRef {
+        use crate::builtins::tuple::IntoPyTuple;
+        let info = get_tz_info();
+        let standard = widestring::decode_utf16_lossy(info.StandardName)
+            .filter(|&c| c != '\0')
+            .collect::<String>();
+        let daylight = widestring::decode_utf16_lossy(info.DaylightName)
+            .filter(|&c| c != '\0')
+            .collect::<String>();
+        let tz_name = (&*standard, &*daylight);
+        tz_name.into_pytuple(vm)
     }
 
     fn pyobj_to_date_time(
@@ -402,7 +450,7 @@ mod decl {
     }
 
     impl std::fmt::Debug for PyStructTime {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "struct_time()")
         }
     }
@@ -461,9 +509,9 @@ mod platform {
     use super::decl::{SEC_TO_NS, US_TO_NS};
     #[cfg_attr(target_os = "macos", allow(unused_imports))]
     use crate::{
+        PyObject, PyRef, PyResult, TryFromBorrowedObject, VirtualMachine,
         builtins::{PyNamespace, PyStrRef},
         convert::IntoPyException,
-        PyObject, PyRef, PyResult, TryFromBorrowedObject, VirtualMachine,
     };
     use nix::{sys::time::TimeSpec, time::ClockId};
     use std::time::Duration;
@@ -673,7 +721,7 @@ mod platform {
         target_os = "openbsd",
     ))]
     pub(super) fn get_process_time(vm: &VirtualMachine) -> PyResult<Duration> {
-        use nix::sys::resource::{getrusage, UsageWho};
+        use nix::sys::resource::{UsageWho, getrusage};
         fn from_timeval(tv: libc::timeval, vm: &VirtualMachine) -> PyResult<i64> {
             (|tv: libc::timeval| {
                 let t = tv.tv_sec.checked_mul(SEC_TO_NS)?;
@@ -695,11 +743,11 @@ mod platform {
 #[cfg(windows)]
 #[pymodule]
 mod platform {
-    use super::decl::{time_muldiv, MS_TO_NS, SEC_TO_NS};
+    use super::decl::{MS_TO_NS, SEC_TO_NS, time_muldiv};
     use crate::{
+        PyRef, PyResult, VirtualMachine,
         builtins::{PyNamespace, PyStrRef},
         stdlib::os::errno_err,
-        PyRef, PyResult, VirtualMachine,
     };
     use std::time::Duration;
     use windows_sys::Win32::{
