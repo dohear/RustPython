@@ -7,11 +7,12 @@ use rustpython_compiler_core::bytecode::{
     OpArg, OpArgState, UnaryOperator,
 };
 use std::collections::HashMap;
+use core::f64;
 
 #[repr(u16)]
 enum CustomTrapCode {
     /// Raised when shifting by a negative number
-    NegativeShiftCount = 0,
+    NegativeShiftCount = 1,
 }
 
 #[derive(Clone)]
@@ -123,14 +124,14 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     fn boolean_val(&mut self, val: JitValue) -> Result<Value, JitCompileError> {
         match val {
             JitValue::Float(val) => {
-                let zero = self.builder.ins().f64const(0);
+                let zero = self.builder.ins().f64const(0.0);
                 let val = self.builder.ins().fcmp(FloatCC::NotEqual, val, zero);
-                Ok(self.builder.ins().bint(types::I8, val))
+                Ok(val)
             }
             JitValue::Int(val) => {
                 let zero = self.builder.ins().iconst(types::I64, 0);
                 let val = self.builder.ins().icmp(IntCC::NotEqual, val, zero);
-                Ok(self.builder.ins().bint(types::I8, val))
+                Ok(val)
             }
             JitValue::Bool(val) => Ok(val),
             JitValue::None => Ok(self.builder.ins().iconst(types::I8, 0)),
@@ -159,8 +160,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         let label_targets = bytecode.label_targets();
 
         let mut arg_state = OpArgState::default();
-        for (offset, instruction) in bytecode.instructions.iter().enumerate() {
-            let (instruction, arg) = arg_state.get(*instruction);
+
+        let mut in_unreachable_code = false;
+
+        for (offset, &raw_instr) in bytecode.instructions.iter().enumerate() {
             let label = Label(offset as u32);
             if label_targets.contains(&label) {
                 let block = self.get_or_create_block(label);
