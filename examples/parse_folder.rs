@@ -4,38 +4,29 @@
 ///
 /// example usage:
 /// $ RUST_LOG=info cargo run --release parse_folder /usr/lib/python3.7
-
-#[macro_use]
-extern crate clap;
 extern crate env_logger;
 #[macro_use]
 extern crate log;
 
-use clap::{App, Arg};
-use rustpython_parser::{Parse, ast};
+use ruff_python_parser::parse_module;
+use rustpython_compiler::ast;
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 fn main() {
     env_logger::init();
-    let app = App::new("parse_folders")
-        .version(crate_version!())
-        .author(crate_authors!())
-        .about("Walks over all .py files in a folder, and parses them.")
-        .arg(
-            Arg::with_name("folder")
-                .help("Folder to scan")
-                .required(true),
-        );
-    let matches = app.get_matches();
 
-    let folder = Path::new(matches.value_of("folder").unwrap());
+    let folder: PathBuf = std::env::args_os()
+        .nth(1)
+        .expect("please pass a path argument")
+        .into();
+
     if folder.exists() && folder.is_dir() {
         println!("Parsing folder of python code: {folder:?}");
         let t1 = Instant::now();
-        let parsed_files = parse_folder(folder).unwrap();
+        let parsed_files = parse_folder(&folder).unwrap();
         let t2 = Instant::now();
         let results = ScanResult {
             t1,
@@ -78,18 +69,19 @@ fn parse_python_file(filename: &Path) -> ParsedFile {
     info!("Parsing file {:?}", filename);
     match std::fs::read_to_string(filename) {
         Err(e) => ParsedFile {
-            // filename: Box::new(filename.to_path_buf()),
-            // code: "".to_owned(),
+            filename: Box::new(filename.to_path_buf()),
+            code: "".to_owned(),
             num_lines: 0,
             result: Err(e.to_string()),
         },
         Ok(source) => {
             let num_lines = source.lines().count();
-            let result =
-                ast::Suite::parse(&source, &filename.to_string_lossy()).map_err(|e| e.to_string());
+            let result = parse_module(&source)
+                .map(|x| x.into_suite())
+                .map_err(|e| e.to_string());
             ParsedFile {
-                // filename: Box::new(filename.to_path_buf()),
-                // code: source.to_string(),
+                filename: Box::new(filename.to_path_buf()),
+                code: source.to_string(),
                 num_lines,
                 result,
             }
@@ -142,8 +134,8 @@ struct ScanResult {
 }
 
 struct ParsedFile {
-    // filename: Box<PathBuf>,
-    // code: String,
+    filename: Box<PathBuf>,
+    code: String,
     num_lines: usize,
     result: ParseResult,
 }

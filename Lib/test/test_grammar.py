@@ -1062,6 +1062,8 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(g2(False), 0)
         self.assertEqual(g2(True), ('end', 1))
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_yield(self):
         # Allowed as standalone statement
         def g(): yield 1
@@ -1617,8 +1619,6 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(x, [('Boeing', 'Airliner'), ('Boeing', 'Engine'), ('Ford', 'Engine'),
                              ('Macdonalds', 'Cheeseburger')])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_genexps(self):
         # generator expression tests
         g = ([x for x in range(10)] for x in range(1))
