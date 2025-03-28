@@ -1,17 +1,25 @@
+use std::ptr::NonNull;
+use crate::Jit;
+
 use super::{JitCompileError, JitSig, JitType};
-use cranelift::{codegen::ir::FuncRef};
+use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 use num_traits::cast::ToPrimitive;
 use rustpython_compiler_core::bytecode::{
     self, BinaryOperator, BorrowedConstant, CodeObject, ComparisonOperator, Instruction, Label,
     OpArg, OpArgState, UnaryOperator,
 };
-use std::{collections::HashMap};
+use std::collections::HashMap;
+use core::f64;
+
+// A small constant for LN(2). You can refine if you want more precision in 32-bit constants.
+const LN2: f64 = 0.6931471805599453;
+const INV_LN2: f64 = 1.4426950408889634; // 1 / ln(2)
 
 #[repr(u16)]
 enum CustomTrapCode {
     /// Raised when shifting by a negative number
-    NegativeShiftCount = 0,
+    NegativeShiftCount = 1,
 }
 
 #[derive(Clone)]
@@ -20,7 +28,16 @@ struct Local {
     ty: JitType,
 }
 
+struct JitObject {
+    locals: Box<[Option<JitValue>]>, //create an array of possible JIT Values to store in locals
+    field_count: usize,
+}
 #[derive(Debug)]
+struct JitObjectRef {
+    ptr: NonNull<JitObject>,
+}
+
+#[derive(Debug, Clone)]
 enum JitValue {
     Int(Value),
     Float(Value),
@@ -28,6 +45,77 @@ enum JitValue {
     None,
     Tuple(Vec<JitValue>),
     FuncRef(FuncRef),
+    Object(JitObjectRef),
+    BuildClassFunc, 
+}
+
+impl JitObject {
+    fn new(field_count: usize) -> Self {
+        JitObject { 
+            locals: vec![None; field_count].into_boxed_slice(),
+            field_count,
+        }
+    }
+    
+    fn get_field(&self, idx: usize) -> Option<&JitValue> {
+        if idx < self.field_count {
+            self.locals.get(idx).and_then(|val| val.as_ref())
+        } else {
+            None
+        }
+    }
+
+    fn set_field(&mut self, idx: usize, value: JitValue) -> bool {
+        if idx < self.field_count {
+            self.locals[idx] = Some(value);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl JitObjectRef {
+    fn new(field_count: usize) -> Self {
+        let obj = Box::new(JitObject::new(field_count));
+        JitObjectRef {
+            ptr: NonNull::from(Box::leak(obj)),
+        }
+    }
+    
+    // Safe access to the object
+    fn with_object<F, R>(&self, f: F) -> R 
+    where 
+        F: FnOnce(&JitObject) -> R 
+    {
+        unsafe { f(self.ptr.as_ref()) }
+    }
+    
+    // Safe mutable access to the object
+    fn with_object_mut<F, R>(&mut self, f: F) -> R 
+    where 
+        F: FnOnce(&mut JitObject) -> R 
+    {
+        unsafe { f(self.ptr.as_mut()) }
+    }
+}
+
+impl Clone for JitObjectRef {
+    fn clone(&self) -> Self {
+        // Create a new reference to the same object
+        JitObjectRef {
+            ptr: self.ptr,
+        }
+    }
+}
+
+// Implement Drop to prevent memory leak
+impl Drop for JitObjectRef {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = Box::from_raw(self.ptr.as_ptr());
+        }
+    }
 }
 
 impl JitValue {
@@ -36,6 +124,7 @@ impl JitValue {
             JitType::Int => JitValue::Int(val),
             JitType::Float => JitValue::Float(val),
             JitType::Bool => JitValue::Bool(val),
+            JitType::Object =>JitValue::Object(JitObjectRef::new(4)), // Need to find a way to set field count dynamically
         }
     }
 
@@ -44,14 +133,14 @@ impl JitValue {
             JitValue::Int(_) => Some(JitType::Int),
             JitValue::Float(_) => Some(JitType::Float),
             JitValue::Bool(_) => Some(JitType::Bool),
-            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) => None,
+            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_) | JitValue::BuildClassFunc => None,
         }
     }
 
     fn into_value(self) -> Option<Value> {
         match self {
             JitValue::Int(val) | JitValue::Float(val) | JitValue::Bool(val) => Some(val),
-            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) => None,
+            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_)  | JitValue::BuildClassFunc  => None,
         }
     }
 }
@@ -91,6 +180,15 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         compiler
     }
 
+    fn get_attribute_index<S: AsRef<str>>(&self, name: S) -> Result<usize, JitCompileError> {
+        let name_str: &str = name.as_ref();
+        // Simple solution: hash the name to get an index within the field count
+        let hash = name_str.bytes().fold(0_usize, |acc, b| acc.wrapping_add(b as usize));
+        // Limit to a reasonable field count (this is very naive, you'd want something better)
+        Ok(hash % 32) // Assuming max 32 fields per object
+    }
+
+
     fn pop_multiple(&mut self, count: usize) -> Vec<JitValue> {
         let stack_len = self.stack.len();
         self.stack.drain(stack_len - count..).collect()
@@ -123,18 +221,18 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     fn boolean_val(&mut self, val: JitValue) -> Result<Value, JitCompileError> {
         match val {
             JitValue::Float(val) => {
-                let zero = self.builder.ins().f64const(0);
+                let zero = self.builder.ins().f64const(0.0);
                 let val = self.builder.ins().fcmp(FloatCC::NotEqual, val, zero);
-                Ok(self.builder.ins().bint(types::I8, val))
+                Ok(val)
             }
             JitValue::Int(val) => {
                 let zero = self.builder.ins().iconst(types::I64, 0);
                 let val = self.builder.ins().icmp(IntCC::NotEqual, val, zero);
-                Ok(self.builder.ins().bint(types::I8, val))
+                Ok(val)
             }
             JitValue::Bool(val) => Ok(val),
             JitValue::None => Ok(self.builder.ins().iconst(types::I8, 0)),
-            JitValue::Tuple(_) | JitValue::FuncRef(_) => Err(JitCompileError::NotSupported),
+            JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_) | JitValue::BuildClassFunc => Err(JitCompileError::NotSupported),
         }
     }
 
@@ -151,44 +249,65 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         func_ref: FuncRef,
         bytecode: &CodeObject<C>,
     ) -> Result<(), JitCompileError> {
-        // TODO: figure out if this is sufficient -- previously individual labels were associated
-        // pretty much per-bytecode that uses them, or at least per "type" of block -- in theory an
-        // if block and a with block might jump to the same place. Now it's all "flattened", so
-        // there might be less distinction between different types of blocks going off
-        // label_targets alone
         let label_targets = bytecode.label_targets();
-
+        // Create an optimized copy of the bytecode
+        //let mut optimized_bytecode = bytecode.clone();
+        // Apply peephole optimizations
+        //self.apply_peephole_optimizations(&mut optimized_bytecode)?;
+        // Now use the optimized bytecode for compilation
+        //let label_targets = optimized_bytecode.label_targets();
         let mut arg_state = OpArgState::default();
-        for (offset, instruction) in bytecode.instructions.iter().enumerate() {
-            let (instruction, arg) = arg_state.get(*instruction);
+    
+        // Track whether we have "returned" in the current block
+        let mut in_unreachable_code = false;
+    
+        for (offset, &raw_instr) in bytecode.instructions.iter().enumerate() {
             let label = Label(offset as u32);
+            let (instruction, arg) = arg_state.get(raw_instr);
+    
+            println!("current Instruction: {:?}, Argument: {:?}\n", instruction, arg);
+    
             if label_targets.contains(&label) {
-                let block = self.get_or_create_block(label);
-
-                // If the current block is not terminated/filled just jump
-                // into the new block.
-                if !self.builder.is_filled() {
-                    self.builder.ins().jump(block, &[]);
+                let target_block = self.get_or_create_block(label);
+    
+                if let Some(cur) = self.builder.current_block() {
+                    if cur != target_block && self.builder.func.layout.last_inst(cur).is_none() {
+                        self.builder.ins().jump(target_block, &[]);
+                    }
                 }
-
-                self.builder.switch_to_block(block);
+                if self.builder.current_block() != Some(target_block) {
+                    self.builder.switch_to_block(target_block);
+                }
+    
+                in_unreachable_code = false;
             }
-
-            // Sometimes the bytecode contains instructions after a return
-            // just ignore those until we are at the next label
-            if self.builder.is_filled() {
+    
+            if in_unreachable_code {
                 continue;
             }
-
+    
+            // Compile with optimized bytecode
             self.add_instruction(func_ref, bytecode, instruction, arg)?;
+    
+            match instruction {
+                Instruction::ReturnValue | Instruction::ReturnConst { .. } => {
+                    in_unreachable_code = true;
+                }
+                _ => {}
+            }
         }
-
+    
+        if let Some(cur) = self.builder.current_block() {
+            if self.builder.func.layout.last_inst(cur).is_none() {
+                self.builder.ins().trap(TrapCode::user(0).unwrap());
+            }
+        }
         Ok(())
     }
 
     fn prepare_const<C: bytecode::Constant>(
         &mut self,
-        constant: BorrowedConstant<'_, C>,
+        constant: BorrowedConstant<C>,
     ) -> Result<JitValue, JitCompileError> {
         let value = match constant {
             BorrowedConstant::Integer { value } => {
@@ -207,6 +326,11 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 JitValue::Bool(val)
             }
             BorrowedConstant::None => JitValue::None,
+            BorrowedConstant::Code { code } => {
+                // For now, we'll just treat code objects as opaque values
+                // that can be passed around but not executed directly
+                JitValue::None // Or create a special JitValue::Code variant
+            }
             _ => return Err(JitCompileError::NotSupported),
         };
         Ok(value)
@@ -214,10 +338,12 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
     fn return_value(&mut self, val: JitValue) -> Result<(), JitCompileError> {
         if let Some(ref ty) = self.sig.ret {
+            // If the signature has a return type, enforce it
             if val.to_jit_type().as_ref() != Some(ty) {
                 return Err(JitCompileError::NotSupported);
             }
         } else {
+            // First time we see a return, define it in the signature
             let ty = val.to_jit_type().ok_or(JitCompileError::NotSupported)?;
             self.sig.ret = Some(ty.clone());
             self.builder
@@ -226,7 +352,12 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 .returns
                 .push(AbiParam::new(ty.to_cranelift()));
         }
-        self.builder.ins().return_(&[val.into_value().unwrap()]);
+
+        // If this is e.g. an Int, Float, or Bool we have a Cranelift `Value`.
+        // If we have JitValue::None or .Tuple(...) but can't handle that, error out (or handle differently).
+        let cr_val = val.into_value().ok_or(JitCompileError::NotSupported)?;
+
+        self.builder.ins().return_(&[cr_val]);
         Ok(())
     }
 
@@ -241,34 +372,30 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             Instruction::ExtendedArg => Ok(()),
             Instruction::JumpIfFalse { target } => {
                 let cond = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-
                 let val = self.boolean_val(cond)?;
                 let then_block = self.get_or_create_block(target.get(arg));
-                self.builder.ins().brz(val, then_block, &[]);
+                let else_block = self.builder.create_block();
 
-                let block = self.builder.create_block();
-                self.builder.ins().jump(block, &[]);
-                self.builder.switch_to_block(block);
+                self.builder.ins().brif(val, else_block, &[], then_block, &[]);
+                self.builder.switch_to_block(else_block);
 
                 Ok(())
             }
             Instruction::JumpIfTrue { target } => {
                 let cond = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-
                 let val = self.boolean_val(cond)?;
                 let then_block = self.get_or_create_block(target.get(arg));
-                self.builder.ins().brnz(val, then_block, &[]);
+                let else_block = self.builder.create_block();
 
-                let block = self.builder.create_block();
-                self.builder.ins().jump(block, &[]);
-                self.builder.switch_to_block(block);
+                self.builder.ins().brif(val, then_block, &[], else_block, &[]);
+                self.builder.switch_to_block(else_block);
 
                 Ok(())
             }
+
             Instruction::Jump { target } => {
                 let target_block = self.get_or_create_block(target.get(arg));
                 self.builder.ins().jump(target_block, &[]);
-
                 Ok(())
             }
             Instruction::LoadFast(idx) => {
@@ -286,10 +413,21 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.store_variable(idx.get(arg), val)
             }
             Instruction::LoadConst { idx } => {
-                let val = self
-                    .prepare_const(bytecode.constants[idx.get(arg) as usize].borrow_constant())?;
-                self.stack.push(val);
-                Ok(())
+                let constant_idx = idx.get(arg) as usize;
+                if constant_idx >= bytecode.constants.len() {
+                    return Err(JitCompileError::BadBytecode);
+                }
+                
+                match self.prepare_const(bytecode.constants[constant_idx].borrow_constant()) {
+                    Ok(val) => {
+                        self.stack.push(val);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("Failed to load constant: {:?}", e);
+                        Err(e)
+                    }
+                }
             }
             Instruction::BuildTuple { size } => {
                 let elements = self.pop_multiple(size.get(arg) as usize);
@@ -354,9 +492,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                         };
 
                         let val = self.builder.ins().icmp(cond, operand_one, operand_two);
-                        // TODO: Remove this `bint` in cranelift 0.90 as icmp now returns i8
-                        self.stack
-                            .push(JitValue::Bool(self.builder.ins().bint(types::I8, val)));
+                        self.stack.push(JitValue::Bool(val));
                         Ok(())
                     }
                     (JitValue::Float(a), JitValue::Float(b)) => {
@@ -370,9 +506,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                         };
 
                         let val = self.builder.ins().fcmp(cond, a, b);
-                        // TODO: Remove this `bint` in cranelift 0.90 as fcmp now returns i8
-                        self.stack
-                            .push(JitValue::Bool(self.builder.ins().bint(types::I8, val)));
+                        self.stack.push(JitValue::Bool(val));
                         Ok(())
                     }
                     _ => Err(JitCompileError::NotSupported),
@@ -414,35 +548,24 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
                 let val = match (op, a, b) {
                     (BinaryOperator::Add, JitValue::Int(a), JitValue::Int(b)) => {
-                        let (out, carry) = self.builder.ins().iadd_ifcout(a, b);
-                        self.builder.ins().trapif(
-                            IntCC::Overflow,
-                            carry,
-                            TrapCode::IntegerOverflow,
-                        );
+                        let (out, carry) = self.builder.ins().sadd_overflow(a, b);
+                        self.builder.ins().trapnz(carry, TrapCode::INTEGER_OVERFLOW);
                         JitValue::Int(out)
                     }
                     (BinaryOperator::Subtract, JitValue::Int(a), JitValue::Int(b)) => {
                         JitValue::Int(self.compile_sub(a, b))
                     }
-                    (BinaryOperator::Multiply, JitValue::Int(a), JitValue::Int(b)) => {
-                        JitValue::Int(self.builder.ins().imul(a, b))
-                    }
                     (BinaryOperator::FloorDivide, JitValue::Int(a), JitValue::Int(b)) => {
                         JitValue::Int(self.builder.ins().sdiv(a, b))
                     }
-                    (BinaryOperator::Divide, JitValue::Int(a), JitValue::Int(b)) => {
-                        // Convert to float for regular division
-                        let a_float = self.builder.ins().fcvt_from_sint(types::F64, a);
-                        let b_float = self.builder.ins().fcvt_from_sint(types::F64, b);
-                        JitValue::Float(self.builder.ins().fdiv(a_float, b_float))
+                    (BinaryOperator::Multiply, JitValue::Int(a), JitValue::Int(b)) =>{
+                        JitValue::Int(self.builder.ins().imul(a, b))
                     }
                     (BinaryOperator::Modulo, JitValue::Int(a), JitValue::Int(b)) => {
                         JitValue::Int(self.builder.ins().srem(a, b))
                     }
-                    // Todo: This should return int when possible
-                    (BinaryOperator::Power, JitValue::Int(a), JitValue::Int(b)) => {  
-                        JitValue::Float(self.compile_ipow(a, b)) 
+                    (BinaryOperator::Power, JitValue::Int(a), JitValue::Int(b)) => { 
+                        JitValue::Int(self.compile_ipow(a, b)) 
                     }
                     (
                         BinaryOperator::Lshift | BinaryOperator::Rshift,
@@ -454,7 +577,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                         let sign = self.builder.ins().ushr_imm(b, 63);
                         self.builder.ins().trapnz(
                             sign,
-                            TrapCode::User(CustomTrapCode::NegativeShiftCount as u16),
+                            TrapCode::user(CustomTrapCode::NegativeShiftCount as u8).unwrap(),
                         );
 
                         let out = if op == BinaryOperator::Lshift {
@@ -529,7 +652,13 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
                 Ok(())
             }
-            Instruction::SetupLoop { .. } | Instruction::PopBlock => {
+            Instruction::SetupLoop { .. } =>{
+                let loop_head = self.builder.create_block(); 
+                self.builder.ins().jump(loop_head, &[]); 
+                self.builder.switch_to_block(loop_head);   
+                Ok(())
+            }
+            Instruction::PopBlock => {
                 // TODO: block support
                 Ok(())
             }
@@ -563,156 +692,671 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     _ => Err(JitCompileError::BadBytecode),
                 }
             }
+            Instruction::LoadBuildClass => {
+                // Create a special JitValue that represents the __build_class__ function
+                let build_class_func = JitValue::BuildClassFunc;
+                self.stack.push(build_class_func);
+                Ok(())
+            }
+            Instruction::StoreAttr { idx } => {
+                let value = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                let obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                
+                if let JitValue::Object(mut obj_ref) = obj {
+                    let attr_name = &bytecode.names[idx.get(arg) as usize];
+                    let attr_idx = self.get_attribute_index(attr_name)?;
+                    
+                    obj_ref.with_object_mut(|o| {
+                        if !o.set_field(attr_idx, value.clone()) {
+                            return Err(JitCompileError::BadBytecode);
+                        }
+                        Ok(())
+                    })?;
+                    
+                    Ok(())
+                } else {
+                    Err(JitCompileError::NotSupported)
+                }
+            }
+            Instruction::LoadAttr { idx } => {
+                let obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                
+                if let JitValue::Object(obj_ref) = obj {
+                    let attr_name = &bytecode.names[idx.get(arg) as usize];
+                    let attr_idx = self.get_attribute_index(attr_name)?; // You'll need to implement this
+                    
+                    let value = obj_ref.with_object(|o| {
+                        o.get_field(attr_idx).cloned().ok_or(JitCompileError::BadBytecode)
+                    })?;
+                    
+                    self.stack.push(value);
+                    Ok(())
+                } else {
+                    Err(JitCompileError::NotSupported)
+                }
+            }
+            Instruction::MakeFunction(flags) => {
+                let flags_value = flags.get(arg);
+                
+                // Pop the qualified name (function name)
+                let qualified_name = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                
+                // Pop the code object
+                let code_obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                
+                // Handle optional flags if present
+                if flags_value.contains(bytecode::MakeFunctionFlags::CLOSURE) {
+                    // Pop closure tuple
+                    let _closure = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                    // For now, we don't actually use the closure
+                }
+                
+                if flags_value.contains(bytecode::MakeFunctionFlags::ANNOTATIONS) {
+                    // Pop annotations dict
+                    let _annotations = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                    // For now, we don't use the annotations
+                }
+                
+                if flags_value.contains(bytecode::MakeFunctionFlags::KW_ONLY_DEFAULTS) {
+                    // Pop keyword-only defaults
+                    let _kw_defaults = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                    // For now, we don't use these
+                }
+                
+                if flags_value.contains(bytecode::MakeFunctionFlags::DEFAULTS) {
+                    // Pop defaults tuple
+                    let _defaults = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                    // For now, we don't use defaults
+                }
+                
+                if flags_value.contains(bytecode::MakeFunctionFlags::TYPE_PARAMS) {
+                    // Pop type parameters tuple
+                    let _type_params = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                    // For now, we don't use type parameters
+                }
+                
+                // For a simple implementation, we'll just create a wrapper around the code object
+                // In a real implementation, you'd want to compile the function
+                
+                // Create a function object (for now just using the existing function reference)
+                let func_value = JitValue::FuncRef(func_ref);
+                
+                // Push it onto the stack
+                self.stack.push(func_value);
+                
+                Ok(())
+            }
+            Instruction::CallFunctionPositional { nargs } => {
+                let nargs_value = nargs.get(arg) as usize;
+                let args = self.pop_multiple(nargs_value);
+                
+                // Get the function itself
+                let func = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                
+                match func {
+                    JitValue::BuildClassFunc => {
+                        // Handle the class building operation
+                        // For a simple case with nargs == 2:
+                        if args.len() == 2 {
+                            // args[0] should be the function defining the class body
+                            // args[1] should be the class name
+                            
+                            // Create a new object with default fields
+                            let obj_ref = JitObjectRef::new(8); // Arbitrary field count
+                            
+                            // Push the new object to the stack
+                            self.stack.push(JitValue::Object(obj_ref));
+                            Ok(())
+                        } else {
+                            Err(JitCompileError::NotSupported)
+                        }
+                    },
+                    JitValue::FuncRef(func_ref) => {
+                        // For normal function calls
+                        // In a simple implementation, we might just execute the function directly
+                        
+                        // This is a placeholder - actual implementation would depend on your architecture
+                        self.stack.push(JitValue::None); // Push a placeholder result
+                        Ok(())
+                    },
+                    _ => Err(JitCompileError::NotSupported),
+                }
+            }
             _ => Err(JitCompileError::NotSupported),
         }
     }
 
     fn compile_sub(&mut self, a: Value, b: Value) -> Value {
-        // TODO: this should be fine, but cranelift doesn't special-case isub_ifbout
-        // let (out, carry) = self.builder.ins().isub_ifbout(a, b);
-        // self.builder
-        //     .ins()
-        //     .trapif(IntCC::Overflow, carry, TrapCode::IntegerOverflow);
-        // TODO: this shouldn't wrap
-        let neg_b = self.builder.ins().ineg(b);
-        let (out, carry) = self.builder.ins().iadd_ifcout(a, neg_b);
+        let (out, carry) = self.builder.ins().ssub_overflow(a, b);
         self.builder
             .ins()
-            .trapif(IntCC::Overflow, carry, TrapCode::IntegerOverflow);
+            .trapnz(carry, TrapCode::INTEGER_OVERFLOW);
         out
     }
-    fn compile_ipow(&mut self, a: Value, b: Value) -> Value {
-        // Convert base to float since result might not always be a Int
-        let float_base = self.builder.ins().fcvt_from_sint(types::F64, a); 
 
-        // Create code blocks
-        let check_block1 = self.builder.create_block(); 
-        let check_block2 = self.builder.create_block(); 
-        let check_block3 = self.builder.create_block(); 
-        let handle_neg_exp = self.builder.create_block();
-        let loop_block = self.builder.create_block(); 
-        let continue_block = self.builder.create_block(); 
-        let exit_block = self.builder.create_block(); 
+    //-------------------------------------
+    // Extended polynomial for exp(x)
+    //-------------------------------------
+    /// Approximate exp(x) without external calls, using an extended Taylor series:
+    ///   1) n = floor(x/ln2)
+    ///   2) r = x - n*ln2
+    ///   3) approximate e^r by summation up to r^8/8!
+    ///   4) result = 2^n * e^r
+    pub fn compile_exp_approx(&mut self, x: Value) -> Value {
+        let f64_ty = types::F64;
+        let i64_ty = types::I64;
 
-        // Set code block params
-        self.builder.append_block_param(check_block1, types::F64);
-        self.builder.append_block_param(check_block1, types::I64); 
-       
-        self.builder.append_block_param(check_block2, types::F64);
-        self.builder.append_block_param(check_block2, types::I64); 
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, f64_ty); // final result
 
-        self.builder.append_block_param(check_block3, types::F64);
-        self.builder.append_block_param(check_block3, types::I64); 
+        // 1) n = floor(x / ln(2))
+        let ln2_val = self.builder.ins().f64const(LN2);
+        let inv_ln2_val = self.builder.ins().f64const(INV_LN2);
 
-        self.builder.append_block_param(handle_neg_exp, types::F64); 
-        self.builder.append_block_param(handle_neg_exp, types::I64); 
+        let n_float = self.builder.ins().fmul(x, inv_ln2_val);
+        let n_i64 = self.builder.ins().fcvt_to_sint_sat(i64_ty, n_float);
 
-        self.builder.append_block_param(loop_block, types::F64); //base
-        self.builder.append_block_param(loop_block, types::F64); //result 
-        self.builder.append_block_param(loop_block, types::I64); //exponent
+        // 2) r = x - (n * ln(2))
+        let n_f64 = self.builder.ins().fcvt_from_sint(f64_ty, n_i64);
+        let partial = self.builder.ins().fmul(n_f64, ln2_val);
+        let r = self.builder.ins().fsub(x, partial);
 
-        self.builder.append_block_param(continue_block, types::F64); //base
-        self.builder.append_block_param(continue_block, types::F64); //result 
-        self.builder.append_block_param(continue_block, types::I64); //exponent
+        // e^r ~ 1 + r + r^2/2! + r^3/3! + ... + r^8/8!
+        // Factorials up to 8!: 1, 1, 2, 6, 24, 120, 720, 5040, 40320
+        let one = self.builder.ins().f64const(1.0);
+        let c_1_2   = self.builder.ins().f64const(1.0 / 2.0);        // 1/2!
+        let c_1_6   = self.builder.ins().f64const(1.0 / 6.0);        // 1/3!
+        let c_1_24  = self.builder.ins().f64const(1.0 / 24.0);       // 1/4!
+        let c_1_120 = self.builder.ins().f64const(1.0 / 120.0);      // 1/5!
+        let c_1_720 = self.builder.ins().f64const(1.0 / 720.0);      // 1/6!
+        let c_1_5040 = self.builder.ins().f64const(1.0 / 5040.0);    // 1/7!
+        let c_1_40320 = self.builder.ins().f64const(1.0 / 40320.0);  // 1/8!
 
-        self.builder.append_block_param(exit_block,types::F64); 
+        let r2 = self.builder.ins().fmul(r, r);
+        let r3 = self.builder.ins().fmul(r2, r);
+        let r4 = self.builder.ins().fmul(r3, r);
+        let r5 = self.builder.ins().fmul(r4, r);
+        let r6 = self.builder.ins().fmul(r5, r);
+        let r7 = self.builder.ins().fmul(r6, r);
+        let r8 = self.builder.ins().fmul(r7, r);
 
-        // Begin evaluating by jumping to first check block
-        self.builder.ins().jump(check_block1, &[float_base, b]); 
+        // sum up
+        let mut sum = one;
+        // (1) + r
+        sum = self.builder.ins().fadd(sum, r);
+        // + r^2 / 2!
+        let term2 = self.builder.ins().fmul(r2, c_1_2);
+        sum = self.builder.ins().fadd(sum, term2);
+        // + r^3 / 3!
+        let term3 = self.builder.ins().fmul(r3, c_1_6);
+        sum = self.builder.ins().fadd(sum, term3);
+        // + r^4 / 4!
+        let term4 = self.builder.ins().fmul(r4, c_1_24);
+        sum = self.builder.ins().fadd(sum, term4);
+        // + r^5 / 5!
+        let term5 = self.builder.ins().fmul(r5, c_1_120);
+        sum = self.builder.ins().fadd(sum, term5);
+        // + r^6 / 6!
+        let term6 = self.builder.ins().fmul(r6, c_1_720);
+        sum = self.builder.ins().fadd(sum, term6);
+        // + r^7 / 7!
+        let term7 = self.builder.ins().fmul(r7, c_1_5040);
+        sum = self.builder.ins().fadd(sum, term7);
+        // + r^8 / 8!
+        let term8 = self.builder.ins().fmul(r8, c_1_40320);
+        sum = self.builder.ins().fadd(sum, term8);
 
-        // Check block one:
-        // Checks if input is O ** n where n > 0
-        // Jumps to exit_block as 0 if true
-        self.builder.switch_to_block(check_block1); 
-        let paramsc1 = self.builder.block_params(check_block1); 
-        let basec1 = paramsc1[0];
-        let expc1 = paramsc1[1];  
-        let zero_f64 = self.builder.ins().f64const(0.0);  
-        let zero_i64 = self.builder.ins().iconst(types::I64, 0);
-        let is_base_zero = self.builder.ins().fcmp(FloatCC::Equal, zero_f64, basec1); 
-        let is_exp_positive = self.builder.ins().icmp(IntCC::SignedGreaterThan, expc1, zero_i64);
-        let is_zero_to_positive = self.builder.ins().band(is_base_zero, is_exp_positive);
-        self.builder.ins().brnz(is_zero_to_positive, exit_block, &[zero_f64]); 
-        self.builder.ins().jump(check_block2, &[basec1, expc1]); 
-        
+        // 4) multiply by 2^n
+        let two_exp = self.compile_pow2_f64(n_i64);
+        let result = self.builder.ins().fmul(two_exp, sum);
 
-        // Check block two:
-        // Checks if exponent is negative
-        // Jumps to a special handle_neg_exponent block if true
-        self.builder.switch_to_block(check_block2);
-        let paramsc2 = self.builder.block_params(check_block2); 
-        let basec2 = paramsc2[0];
-        let expc2 = paramsc2[1]; 
-        let zero_i64 = self.builder.ins().iconst(types::I64, 0); 
-        let is_neg = self.builder.ins().icmp(IntCC::SignedLessThan, expc2, zero_i64); 
-        self.builder.ins().brnz(is_neg, handle_neg_exp, &[basec2, expc2]); 
-        self.builder.ins().jump(check_block3, &[basec2, expc2]); 
-        
-        // Check block three:
-        // Checks if exponent is one
-        // jumps to exit block with the base of the exponents value
-        self.builder.switch_to_block(check_block3);
-        let paramsc3 = self.builder.block_params(check_block3); 
-        let basec3 = paramsc3[0];
-        let expc3 = paramsc3[1]; 
-        let resc3 = self.builder.ins().f64const(1.0); 
-        let one_i64 = self.builder.ins().iconst(types::I64, 1); 
-        let is_one = self.builder.ins().icmp(IntCC::Equal, expc3, one_i64); 
-        self.builder.ins().brnz(is_one, exit_block, &[basec3]); 
-        self.builder.ins().jump(loop_block, &[basec3, resc3, expc3]); 
+        self.builder.ins().jump(merge_block, &[result]);
 
-        // Handles negative Exponents
-        // calcultates x^(-n) = (1/x)^n
-        // then proceeds to the loop to evaluate
-        self.builder.switch_to_block(handle_neg_exp); 
-        let paramshn = self.builder.block_params(handle_neg_exp); 
-        let basehn = paramshn[0]; 
-        let exphn = paramshn[1];  
-        let one_f64 = self.builder.ins().f64const(1.0); 
-        let base_inverse = self.builder.ins().fdiv(one_f64, basehn);
-        let pos_exp = self.builder.ins().ineg(exphn); 
-        self.builder.ins().jump(loop_block, &[base_inverse, one_f64, pos_exp]); 
-
-        // Main loop block
-        // checks loop condition (exp > 0)
-        // Jumps to continue block if true, exit block if false
-        self.builder.switch_to_block(loop_block); 
-        let paramslb = self.builder.block_params(loop_block); 
-        let baselb = paramslb[0]; 
-        let reslb = paramslb[1];
-        let explb = paramslb[2]; 
-        let zero = self.builder.ins().iconst(types::I64, 0); 
-        let is_zero = self.builder.ins().icmp(IntCC::Equal, explb, zero);
-        self.builder.ins().brnz(is_zero, exit_block, &[reslb]);
-        self.builder.ins().jump(continue_block, &[baselb, reslb, explb]); 
-
-        // Continue block
-        // Main math logic
-        // Always jumps back to loob_block
-        self.builder.switch_to_block(continue_block); 
-        let paramscb = self.builder.block_params(continue_block); 
-        let basecb = paramscb[0];
-        let rescb = paramscb[1];
-        let expcb = paramscb[2]; 
-        let is_odd = self.builder.ins().band_imm(expcb, 1);
-        let is_odd = self.builder.ins().icmp_imm(IntCC::Equal, is_odd, 1);
-        let mul_result = self.builder.ins().fmul(rescb, basecb);
-        let new_result = self.builder.ins().select(is_odd, mul_result, rescb);
-        let squared_base = self.builder.ins().fmul(basecb, basecb);
-        let new_exp = self.builder.ins().sshr_imm(expcb, 1);
-        self.builder.ins().jump(loop_block, &[squared_base, new_result, new_exp]);
-
-        self.builder.switch_to_block(exit_block); 
-        let result = self.builder.block_params(exit_block)[0];
-        
-        self.builder.seal_block(check_block1); 
-        self.builder.seal_block(check_block2); 
-        self.builder.seal_block(check_block3); 
-        self.builder.seal_block(handle_neg_exp); 
-        self.builder.seal_block(loop_block);
-        self.builder.seal_block(continue_block); 
-        self.builder.seal_block(exit_block); 
-        
-        result
+        self.builder.switch_to_block(merge_block);
+        let final_val = self.builder.block_params(merge_block)[0];
+        final_val
     }
+
+    /// Helper: compute 2^(n_i64) as an f64, with a small clamp. 
+    /// For demonstration only.
+    fn compile_pow2_f64(&mut self, n_i64: Value) -> Value {
+        let f64_ty = types::F64;
+        let i64_ty = types::I64;
+
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, f64_ty);
+
+        let minus_1023 = self.builder.ins().iconst(i64_ty, -1023);
+        let plus_1023 = self.builder.ins().iconst(i64_ty, 1023);
+
+        let clamp_low_block = self.builder.create_block();
+        let clamp_high_block = self.builder.create_block();
+        let after_clamp_block = self.builder.create_block();
+
+        self.builder.append_block_param(after_clamp_block, i64_ty);
+
+        let is_too_small = self.builder.ins().icmp(IntCC::SignedLessThan, n_i64, minus_1023);
+        self.builder
+            .ins()
+            .brif(is_too_small, clamp_low_block, &[], clamp_high_block, &[]);
+
+        // clamp_low_block => n = -1023
+        self.builder.switch_to_block(clamp_low_block);
+        self.builder.ins().jump(after_clamp_block, &[minus_1023]);
+
+        // clamp_high_block => check if n>1023
+        self.builder.switch_to_block(clamp_high_block);
+        let is_too_big = self.builder.ins().icmp(IntCC::SignedGreaterThan, n_i64, plus_1023);
+        let clamp_really_high_block = self.builder.create_block();
+        let pass_block = self.builder.create_block();
+
+        self.builder
+            .ins()
+            .brif(is_too_big, clamp_really_high_block, &[], pass_block, &[]);
+
+        // clamp_really_high_block => n=1023
+        self.builder.switch_to_block(clamp_really_high_block);
+        self.builder.ins().jump(after_clamp_block, &[plus_1023]);
+
+        // pass_block => no clamp
+        self.builder.switch_to_block(pass_block);
+        self.builder.ins().jump(after_clamp_block, &[n_i64]);
+
+        // unify
+        self.builder.switch_to_block(after_clamp_block);
+        let n_clamped = self.builder.block_params(after_clamp_block)[0];
+
+        let pow_val = self.compile_int_pow_f64(2.0, n_clamped);
+        self.builder.ins().jump(merge_block, &[pow_val]);
+
+        self.builder.switch_to_block(merge_block);
+        let final_val = self.builder.block_params(merge_block)[0];
+        final_val
+    }
+
+    /// A minimal exponent-by-squaring in f64 for base^exp_i64. 
+    fn compile_int_pow_f64(&mut self, base_f64: f64, exp_i64: Value) -> Value {
+        let f64_ty = types::F64;
+        let i64_ty = types::I64;
+
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, f64_ty);
+
+        let base_val = self.builder.ins().f64const(base_f64);
+        let zero_i = self.builder.ins().iconst(i64_ty, 0);
+        let one_f = self.builder.ins().f64const(1.0);
+
+        // Check if exp == 0
+        let eq_block = self.builder.create_block();
+        let neq_block = self.builder.create_block();
+
+        let cmp_eq = self.builder.ins().icmp(IntCC::Equal, exp_i64, zero_i);
+        self.builder.ins().brif(cmp_eq, eq_block, &[], neq_block, &[]);
+
+        // eq_block => return 1.0
+        self.builder.switch_to_block(eq_block);
+        self.builder.ins().jump(merge_block, &[one_f]);
+
+        // neq_block => check if exp < 0
+        self.builder.switch_to_block(neq_block);
+        let neg_block = self.builder.create_block();
+        let pos_block = self.builder.create_block();
+
+        let cmp_lt = self.builder.ins().icmp(IntCC::SignedLessThan, exp_i64, zero_i);
+        self.builder.ins().brif(cmp_lt, neg_block, &[], pos_block, &[]);
+
+        // neg_block => 1/(base^(abs(exp)))
+        self.builder.switch_to_block(neg_block);
+        let zero_i64 = self.builder.ins().iconst(i64_ty, 0);
+        let neg_exp = self.builder.ins().isub(zero_i64, exp_i64);
+        let pos_val = self.compile_int_pow_loop(base_val, neg_exp);
+        let inv_val = self.builder.ins().fdiv(one_f, pos_val);
+        self.builder.ins().jump(merge_block, &[inv_val]);
+
+        // pos_block => exponent >= 1
+        self.builder.switch_to_block(pos_block);
+        let pos_res = self.compile_int_pow_loop(base_val, exp_i64);
+        self.builder.ins().jump(merge_block, &[pos_res]);
+
+        // unify
+        self.builder.switch_to_block(merge_block);
+        let final_val = self.builder.block_params(merge_block)[0];
+        final_val
+    }
+
+    /// A simple exponent-by-squaring loop: base^exp for exp>0.
+    fn compile_int_pow_loop(&mut self, base: Value, exp: Value) -> Value {
+        let f64_ty = types::F64;
+        let i64_ty = types::I64;
+
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, f64_ty);
+
+        let loop_block = self.builder.create_block();
+        self.builder.append_block_param(loop_block, f64_ty); // result
+        self.builder.append_block_param(loop_block, f64_ty); // current_base
+        self.builder.append_block_param(loop_block, i64_ty); // e
+
+        // init => result=1.0, base=base, e=exp
+        let one_f = self.builder.ins().f64const(1.0);
+        self.builder.ins().jump(loop_block, &[one_f, base, exp]);
+
+        self.builder.switch_to_block(loop_block);
+        let phi_result = self.builder.block_params(loop_block)[0];
+        let phi_base   = self.builder.block_params(loop_block)[1];
+        let phi_e      = self.builder.block_params(loop_block)[2];
+
+        // if e==0 => done
+        let zero_i = self.builder.ins().iconst(i64_ty, 0);
+        let e_done = self.builder.ins().icmp(IntCC::Equal, phi_e, zero_i);
+        let exit_block = self.builder.create_block();
+        let body_block = self.builder.create_block();
+        self.builder.ins().brif(e_done, exit_block, &[], body_block, &[]);
+
+        // body_block => check if e is odd => multiply result
+        self.builder.switch_to_block(body_block);
+        let two_i = self.builder.ins().iconst(i64_ty, 2);
+        let remainder = self.builder.ins().urem(phi_e, two_i);
+        let one_i = self.builder.ins().iconst(i64_ty, 1);
+        let is_odd = self.builder.ins().icmp(IntCC::Equal, remainder, one_i);
+
+        let odd_block = self.builder.create_block();
+        let even_block = self.builder.create_block();
+        let update_block = self.builder.create_block();
+        self.builder.append_block_param(update_block, f64_ty);
+
+        self.builder.ins().brif(is_odd, odd_block, &[], even_block, &[]);
+
+        // odd => multiply
+        self.builder.switch_to_block(odd_block);
+        let mulres = self.builder.ins().fmul(phi_result, phi_base);
+        self.builder.ins().jump(update_block, &[mulres]);
+
+        // even => keep
+        self.builder.switch_to_block(even_block);
+        self.builder.ins().jump(update_block, &[phi_result]);
+
+        // unify update_result
+        self.builder.switch_to_block(update_block);
+        let new_result = self.builder.block_params(update_block)[0];
+
+        // e //= 2
+        let new_e = self.builder.ins().sdiv(phi_e, two_i);
+        // base = base^2
+        let sq_base = self.builder.ins().fmul(phi_base, phi_base);
+
+        self.builder.ins().jump(loop_block, &[new_result, sq_base, new_e]);
+
+        // exit
+        self.builder.switch_to_block(exit_block);
+        let final_val = phi_result;
+        self.builder.ins().jump(merge, &[final_val]);
+
+        self.builder.switch_to_block(merge);
+        let ret_val = self.builder.block_params(merge)[0];
+        ret_val
+    }
+
+    //-------------------------------------
+    // Extended polynomial for ln(x)
+    //-------------------------------------
+
+    /// Approximate ln(x) for x>0 with a more extended Taylor series:
+    ///   1) If x <= 0 => produce NaN (or trap).
+    ///   2) Range reduce: x = 2^n * m, where m in [1,2).
+    ///   3) ln(x) = n*ln(2) + ln(m).
+    ///   4) Approx ln(m) in [1,2) by ln(1 + r) with r = m-1, including terms up to r^8.
+    pub fn compile_ln_approx(&mut self, x: Value) -> Value {
+        let f64_ty = types::F64;
+        let i64_ty = types::I64;
+
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, f64_ty);
+
+        // Check if x <= 0 => produce NaN
+        let zero_f = self.builder.ins().f64const(0.0);
+        let cmp_le = self.builder.ins().fcmp(FloatCC::LessThanOrEqual, x, zero_f);
+
+        let nan_block = self.builder.create_block();
+        let pos_block = self.builder.create_block();
+
+        self.builder.ins().brif(cmp_le, nan_block, &[], pos_block, &[]);
+
+        // nan_block => return NaN
+        self.builder.switch_to_block(nan_block);
+        let nan_f = self.builder.ins().f64const(f64::NAN);
+        self.builder.ins().jump(merge_block, &[nan_f]);
+
+        // pos_block => handle x>0
+        self.builder.switch_to_block(pos_block);
+
+        // 1) compute n = floor(x * INV_LN2)
+        let inv_ln2_val = self.builder.ins().f64const(INV_LN2);
+        let n_float = self.builder.ins().fmul(x, inv_ln2_val);
+        let n_i64 = self.builder.ins().fcvt_to_sint_sat(i64_ty, n_float);
+
+        // 2) m = x / 2^n
+        let two_n = self.compile_pow2_f64(n_i64);
+        let m_val = self.builder.ins().fdiv(x, two_n);
+
+        // 3) ln(x) = n*ln(2) + ln(m)
+        let ln2_val = self.builder.ins().f64const(LN2);
+        let n_f64 = self.builder.ins().fcvt_from_sint(f64_ty, n_i64);
+        let n_ln2 = self.builder.ins().fmul(n_f64, ln2_val);
+
+        // 4) approximate ln(m) with m in [1,2):
+        //    Let m = 1 + r, so r = m - 1 in [0,1).
+        //    ln(1 + r) ~ r - r^2/2 + r^3/3 - r^4/4 + ... +/- r^8/8
+        //    We’ll take terms up to r^8 for better accuracy.
+        let one_f = self.builder.ins().f64const(1.0);
+        let r = self.builder.ins().fsub(m_val, one_f);
+
+        // Build powers of r
+        let r2 = self.builder.ins().fmul(r, r);
+        let r3 = self.builder.ins().fmul(r2, r);
+        let r4 = self.builder.ins().fmul(r3, r);
+        let r5 = self.builder.ins().fmul(r4, r);
+        let r6 = self.builder.ins().fmul(r5, r);
+        let r7 = self.builder.ins().fmul(r6, r);
+        let r8 = self.builder.ins().fmul(r7, r);
+
+        // We'll accumulate: r - r^2/2 + r^3/3 - r^4/4 + r^5/5 - r^6/6 + r^7/7 - r^8/8
+        // Put constants in:
+        let c_1_2   = self.builder.ins().f64const(0.5);
+        let c_1_3   = self.builder.ins().f64const(1.0 / 3.0);
+        let c_1_4   = self.builder.ins().f64const(0.25);
+        let c_1_5   = self.builder.ins().f64const(0.2);
+        let c_1_6   = self.builder.ins().f64const(1.0 / 6.0);
+        let c_1_7   = self.builder.ins().f64const(1.0 / 7.0);
+        let c_1_8   = self.builder.ins().f64const(1.0 / 8.0);
+
+        // r^1
+        let mut ln_m_approx = r;
+        // - r^2/2
+        let t2 = self.builder.ins().fmul(r2, c_1_2);
+        let t2_neg = self.builder.ins().fneg(t2);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t2_neg);
+        // + r^3/3
+        let t3 = self.builder.ins().fmul(r3, c_1_3);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t3);
+        // - r^4/4
+        let t4 = self.builder.ins().fmul(r4, c_1_4);
+        let t4_neg = self.builder.ins().fneg(t4);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t4_neg);
+        // + r^5/5
+        let t5 = self.builder.ins().fmul(r5, c_1_5);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t5);
+        // - r^6/6
+        let t6 = self.builder.ins().fmul(r6, c_1_6);
+        let t6_neg = self.builder.ins().fneg(t6);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t6_neg);
+        // + r^7/7
+        let t7 = self.builder.ins().fmul(r7, c_1_7);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t7);
+        // - r^8/8
+        let t8 = self.builder.ins().fmul(r8, c_1_8);
+        let t8_neg = self.builder.ins().fneg(t8);
+        ln_m_approx = self.builder.ins().fadd(ln_m_approx, t8_neg);
+
+        // total = n_ln2 + ln(m)
+        let ln_approx = self.builder.ins().fadd(n_ln2, ln_m_approx);
+
+        self.builder.ins().jump(merge_block, &[ln_approx]);
+
+        self.builder.switch_to_block(merge_block);
+        let final_val = self.builder.block_params(merge_block)[0];
+        final_val
+    }
+
+    //-------------------------------------
+    // Improved fpow: a^b = exp(b * ln(a))
+    //-------------------------------------
+    fn compile_fpow(&mut self, a: Value, b: Value) -> Value {
+        // Equivalent of `exp(b * ln(a))`
+        let ln_a = self.compile_ln_approx(a);
+        let prod = self.builder.ins().fmul(b, ln_a);
+        self.compile_exp_approx(prod)
+    }
+
+    fn compile_ipow(&mut self, a: Value, b: Value) -> Value {
+
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let one_i64 = self.builder.ins().iconst(types::I64, 1);
+        
+        // Create required blocks
+        let check_negative = self.builder.create_block();
+        let handle_negative = self.builder.create_block();
+        let loop_block = self.builder.create_block();
+        let continue_block = self.builder.create_block();
+        let exit_block = self.builder.create_block();
+        
+        // Set up block parameters
+        self.builder.append_block_param(check_negative, types::I64);  // exponent
+        self.builder.append_block_param(check_negative, types::I64);  // base
+        
+        self.builder.append_block_param(handle_negative, types::I64); // abs(exponent)
+        self.builder.append_block_param(handle_negative, types::I64); // base
+        
+        self.builder.append_block_param(loop_block, types::I64);     // exponent
+        self.builder.append_block_param(loop_block, types::I64);     // result
+        self.builder.append_block_param(loop_block, types::I64);     // base
+        
+        self.builder.append_block_param(exit_block, types::I64);     // final result
+    
+        // Set up parameters for continue_block
+        self.builder.append_block_param(continue_block, types::I64); // exponent
+        self.builder.append_block_param(continue_block, types::I64); // result
+        self.builder.append_block_param(continue_block, types::I64); // base
+        
+        // Initial jump to check if exponent is negative
+        self.builder.ins().jump(check_negative, &[b, a]);
+        
+        // Check if exponent is negative
+        self.builder.switch_to_block(check_negative);
+        let params = self.builder.block_params(check_negative);
+        let exp_check = params[0];
+        let base_check = params[1];
+        
+        let is_negative = self.builder.ins().icmp(IntCC::SignedLessThan, exp_check, zero);
+        //self.builder.ins().brnz(is_negative, handle_negative, &[exp_check, base_check]);
+        //self.builder.ins().jump(loop_block, &[exp_check, one_i64, base_check]);
+        self.builder.ins().brif(is_negative, handle_negative, &[exp_check, base_check], loop_block, &[exp_check, one_i64, base_check]);
+        
+        // Handle negative exponent (return 0 for integer exponentiation)
+        self.builder.switch_to_block(handle_negative);
+        self.builder.ins().jump(exit_block, &[zero]);  // Return 0 for negative exponents
+    
+        // Loop block logic (square-and-multiply algorithm)
+        self.builder.switch_to_block(loop_block);
+        let params = self.builder.block_params(loop_block);
+        let exp_phi = params[0];    
+        let result_phi = params[1]; 
+        let base_phi = params[2];   
+    
+        // Check if exponent is zero
+        let is_zero = self.builder.ins().icmp(IntCC::Equal, exp_phi, zero);
+        //self.builder.ins().brnz(is_zero, exit_block, &[result_phi]);
+        //self.builder.ins().jump(continue_block, &[exp_phi, result_phi, base_phi]);
+        self.builder.ins().brif(is_zero, exit_block, &[result_phi], continue_block, &[exp_phi, result_phi, base_phi]);
+    
+        // Continue block for non-zero case
+        self.builder.switch_to_block(continue_block);
+        let params = self.builder.block_params(continue_block);
+        let exp_phi = params[0];
+        let result_phi = params[1];
+        let base_phi = params[2];
+        
+        // If exponent is odd, multiply result by base
+        let is_odd = self.builder.ins().band_imm(exp_phi, 1);
+        let is_odd = self.builder.ins().icmp_imm(IntCC::Equal, is_odd, 1);
+        let mul_result = self.builder.ins().imul(result_phi, base_phi);
+        let new_result = self.builder.ins().select(is_odd, mul_result, result_phi);
+        
+        // Square the base and divide exponent by 2
+        let squared_base = self.builder.ins().imul(base_phi, base_phi);
+        let new_exp = self.builder.ins().sshr_imm(exp_phi, 1);
+        self.builder.ins().jump(loop_block, &[new_exp, new_result, squared_base]);
+    
+        // Exit block
+        self.builder.switch_to_block(exit_block);
+        let res = self.builder.block_params(exit_block)[0];
+    
+        // Seal all blocks
+        self.builder.seal_block(check_negative);
+        self.builder.seal_block(handle_negative);
+        self.builder.seal_block(loop_block);
+        self.builder.seal_block(continue_block);
+        self.builder.seal_block(exit_block);
+    
+        res 
+    }
+
+    /* 
+    fn apply_peephole_optimizations(&mut self, bytecode: &mut CodeObject<C>) -> Result<(), JitCompileError> {
+        let instructions = &mut bytecode.instructions;
+        let mut i = 0;
+        
+        while i < instructions.len() - 1 {
+            // Check for pattern: UNARY_NOT followed by UNARY_NOT (double negation)
+            if self.match_double_not(instructions, i) {
+                // Replace with NOP + NOP (will be removed in a cleanup pass)
+                instructions[i] = Instruction::NOP.into();
+                instructions[i+1] = Instruction::NOP.into();
+                i += 2;
+                continue;
+            }
+            
+            // Check for pattern: LOAD_CONST(0) followed by BINARY_ADD
+            if self.match_add_zero(instructions, i, bytecode) {
+                // Replace with NOP + NOP
+                instructions[i] = Instruction::NOP.into();
+                instructions[i+1] = Instruction::NOP.into();
+                i += 2;
+                continue;
+            }
+            
+            // Add more patterns here
+            
+            i += 1;
+        }
+        
+        // Clean up NOPs
+        self.cleanup_nops(bytecode);
+        
+        Ok(())
+    }
+    
+    fn match_double_not(&self, instructions: &[OpArg], i: usize) -> bool {
+        // Check if instructions[i] and instructions[i+1] are both UNARY_NOT
+        if i + 1 >= instructions.len() {
+            return false;
+        }
+        
+        let (instr1, _) = OpArgState::default().get(instructions[i]);
+        let (instr2, _) = OpArgState::default().get(instructions[i+1]);
+        
+        matches!(instr1, Instruction::UnaryOperation { op } if op.is_op(&[UnaryOperator::Not])) &&
+        matches!(instr2, Instruction::UnaryOperation { op } if op.is_op(&[UnaryOperator::Not]))
+    } 
+    */
 }
