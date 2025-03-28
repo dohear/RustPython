@@ -41,11 +41,12 @@ use nix::{
     sys::signal::{SaFlags, SigAction, SigSet, Signal::SIGINT, kill, sigaction},
     unistd::getpid,
 };
-use std::sync::atomic::AtomicBool;
 use std::{
     borrow::Cow,
     cell::{Cell, Ref, RefCell},
     collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    sync::atomic::AtomicBool,
 };
 
 pub use context::Context;
@@ -106,8 +107,8 @@ pub struct PyGlobalState {
 }
 
 pub fn process_hash_secret_seed() -> u32 {
-    use once_cell::sync::OnceCell;
-    static SEED: OnceCell<u32> = OnceCell::new();
+    use std::sync::OnceLock;
+    static SEED: OnceLock<u32> = OnceLock::new();
     *SEED.get_or_init(rand::random)
 }
 
@@ -363,8 +364,11 @@ impl VirtualMachine {
             }
         }
 
+        let expect_stdlib =
+            cfg!(feature = "freeze-stdlib") || !self.state.settings.path_list.is_empty();
+
         #[cfg(feature = "encodings")]
-        if cfg!(feature = "freeze-stdlib") || !self.state.settings.path_list.is_empty() {
+        if expect_stdlib {
             if let Err(e) = self.import_encodings() {
                 eprintln!(
                     "encodings initialization failed. Only utf-8 encoding will be supported."
@@ -379,6 +383,21 @@ impl VirtualMachine {
                 Please add the library path to `settings.path_list`. If you intended to disable the entire standard library (including the `encodings` feature), please also make sure to disable the `encodings` feature.\n\
                 Tip: You may also want to add `\"\"` to `settings.path_list` in order to enable importing from the current working directory."
             );
+        }
+
+        if expect_stdlib {
+            // enable python-implemented ExceptionGroup when stdlib exists
+            let py_core_init = || -> PyResult<()> {
+                let exception_group = import::import_frozen(self, "_py_exceptiongroup")?;
+                let base_exception_group = exception_group.get_attr("BaseExceptionGroup", self)?;
+                self.builtins
+                    .set_attr("BaseExceptionGroup", base_exception_group, self)?;
+                let exception_group = exception_group.get_attr("ExceptionGroup", self)?;
+                self.builtins
+                    .set_attr("ExceptionGroup", exception_group, self)?;
+                Ok(())
+            };
+            self.expect_pyresult(py_core_init(), "exceptiongroup initialization failed");
         }
 
         self.initialized = true;
@@ -610,7 +629,7 @@ impl VirtualMachine {
                 let from_list = from_list.to_pyobject(self);
                 import_func
                     .call((module.to_owned(), globals, locals, from_list, level), self)
-                    .map_err(|exc| import::remove_importlib_frames(self, &exc))
+                    .inspect_err(|exc| import::remove_importlib_frames(self, exc))
             }
         }
     }
@@ -900,6 +919,54 @@ impl VirtualMachine {
         let run_module_as_main = runpy.get_attr("_run_module_as_main", self)?;
         run_module_as_main.call((module,), self)?;
         Ok(())
+    }
+
+    pub fn fs_encoding(&self) -> &'static PyStrInterned {
+        identifier!(self, utf_8)
+    }
+
+    pub fn fs_encode_errors(&self) -> &'static PyStrInterned {
+        if cfg!(windows) {
+            identifier!(self, surrogatepass)
+        } else {
+            identifier!(self, surrogateescape)
+        }
+    }
+
+    pub fn fsdecode(&self, s: impl Into<OsString>) -> PyStrRef {
+        match s.into().into_string() {
+            Ok(s) => self.ctx.new_str(s),
+            Err(s) => {
+                let bytes = self.ctx.new_bytes(s.into_encoded_bytes());
+                let errors = self.fs_encode_errors().to_owned();
+                let res = self.state.codec_registry.decode_text(
+                    bytes.into(),
+                    "utf-8",
+                    Some(errors),
+                    self,
+                );
+                self.expect_pyresult(res, "fsdecode should be lossless and never fail")
+            }
+        }
+    }
+
+    pub fn fsencode<'a>(&self, s: &'a Py<PyStr>) -> PyResult<Cow<'a, OsStr>> {
+        if cfg!(windows) || s.is_utf8() {
+            // XXX: this is sketchy on windows; it's not guaranteed that the
+            //      OsStr encoding will always be compatible with WTF-8.
+            let s = unsafe { OsStr::from_encoded_bytes_unchecked(s.as_bytes()) };
+            return Ok(Cow::Borrowed(s));
+        }
+        let errors = self.fs_encode_errors().to_owned();
+        let bytes = self
+            .state
+            .codec_registry
+            .encode_text(s.to_owned(), "utf-8", Some(errors), self)?
+            .to_vec();
+        // XXX: this is sketchy on windows; it's not guaranteed that the
+        //      OsStr encoding will always be compatible with WTF-8.
+        let s = unsafe { OsString::from_encoded_bytes_unchecked(bytes) };
+        Ok(Cow::Owned(s))
     }
 }
 

@@ -1953,8 +1953,8 @@ mod _sqlite {
 
     impl AsMapping for Row {
         fn as_mapping() -> &'static PyMappingMethods {
-            static AS_MAPPING: once_cell::sync::Lazy<PyMappingMethods> =
-                once_cell::sync::Lazy::new(|| PyMappingMethods {
+            static AS_MAPPING: std::sync::LazyLock<PyMappingMethods> =
+                std::sync::LazyLock::new(|| PyMappingMethods {
                     length: atomic_func!(|mapping, _vm| Ok(Row::mapping_downcast(mapping)
                         .data
                         .len())),
@@ -1969,8 +1969,8 @@ mod _sqlite {
 
     impl AsSequence for Row {
         fn as_sequence() -> &'static PySequenceMethods {
-            static AS_SEQUENCE: once_cell::sync::Lazy<PySequenceMethods> =
-                once_cell::sync::Lazy::new(|| PySequenceMethods {
+            static AS_SEQUENCE: std::sync::LazyLock<PySequenceMethods> =
+                std::sync::LazyLock::new(|| PySequenceMethods {
                     length: atomic_func!(|seq, _vm| Ok(Row::sequence_downcast(seq).data.len())),
                     item: atomic_func!(|seq, i, vm| Row::sequence_downcast(seq)
                         .data
@@ -2929,9 +2929,12 @@ mod _sqlite {
     }
 
     fn str_to_ptr_len(s: &PyStr, vm: &VirtualMachine) -> PyResult<(*const libc::c_char, i32)> {
-        let len = c_int::try_from(s.byte_len())
+        let s = s
+            .to_str()
+            .ok_or_else(|| vm.new_unicode_encode_error("surrogates not allowed".to_owned()))?;
+        let len = c_int::try_from(s.len())
             .map_err(|_| vm.new_overflow_error("TEXT longer than INT_MAX bytes".to_owned()))?;
-        let ptr = s.as_str().as_ptr().cast();
+        let ptr = s.as_ptr().cast();
         Ok((ptr, len))
     }
 
@@ -3000,7 +3003,7 @@ mod _sqlite {
     ) -> PyResult<*const libc::c_char> {
         BEGIN_STATEMENTS
             .iter()
-            .find(|&&x| x[6..].eq_ignore_ascii_case(s.as_str().as_bytes()))
+            .find(|&&x| x[6..].eq_ignore_ascii_case(s.as_bytes()))
             .map(|&x| x.as_ptr().cast())
             .ok_or_else(|| {
                 vm.new_value_error(

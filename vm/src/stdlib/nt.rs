@@ -1,3 +1,5 @@
+// cspell:disable
+
 use crate::{PyRef, VirtualMachine, builtins::PyModule};
 
 pub use module::raw_set_handle_inheritable;
@@ -33,6 +35,9 @@ pub(crate) mod module {
 
     #[pyattr]
     use libc::{O_BINARY, O_TEMPORARY};
+
+    #[pyattr]
+    const _LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: i32 = 4096;
 
     #[pyfunction]
     pub(super) fn access(path: OsPath, mode: u8, vm: &VirtualMachine) -> PyResult<bool> {
@@ -246,7 +251,7 @@ pub(crate) mod module {
             .as_ref()
             .canonicalize()
             .map_err(|e| e.to_pyexception(vm))?;
-        path.mode.process_path(real, vm)
+        Ok(path.mode.process_path(real, vm))
     }
 
     #[pyfunction]
@@ -279,7 +284,7 @@ pub(crate) mod module {
             }
         }
         let buffer = widestring::WideCString::from_vec_truncate(buffer);
-        path.mode.process_path(buffer.to_os_string(), vm)
+        Ok(path.mode.process_path(buffer.to_os_string(), vm))
     }
 
     #[pyfunction]
@@ -294,7 +299,7 @@ pub(crate) mod module {
             return Err(errno_err(vm));
         }
         let buffer = widestring::WideCString::from_vec_truncate(buffer);
-        path.mode.process_path(buffer.to_os_string(), vm)
+        Ok(path.mode.process_path(buffer.to_os_string(), vm))
     }
 
     #[pyfunction]

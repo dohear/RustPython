@@ -768,7 +768,7 @@ impl PyType {
                 value.class().slot_name(),
             ))
         })?;
-        if name.as_str().as_bytes().contains(&0) {
+        if name.as_bytes().contains(&0) {
             return Err(vm.new_value_error("type name must not contain null characters".to_owned()));
         }
 
@@ -811,7 +811,7 @@ impl Constructor for PyType {
         let (name, bases, dict, kwargs): (PyStrRef, PyTupleRef, PyDictRef, KwArgs) =
             args.clone().bind(vm)?;
 
-        if name.as_str().as_bytes().contains(&0) {
+        if name.as_bytes().contains(&0) {
             return Err(vm.new_value_error("type name must not contain null characters".to_owned()));
         }
 
@@ -884,7 +884,7 @@ impl Constructor for PyType {
 
         attributes
             .entry(identifier!(vm, __qualname__))
-            .or_insert_with(|| vm.ctx.new_str(name.as_str()).into());
+            .or_insert_with(|| name.clone().into());
 
         if attributes.get(identifier!(vm, __eq__)).is_some()
             && attributes.get(identifier!(vm, __hash__)).is_none()

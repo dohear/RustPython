@@ -1,4 +1,4 @@
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use super::type_;
 use crate::{
@@ -124,7 +124,7 @@ impl PyGenericAlias {
         Ok(format!(
             "{}[{}]",
             repr_item(self.origin.clone().into(), vm)?,
-            if self.args.len() == 0 {
+            if self.args.is_empty() {
                 "()".to_owned()
             } else {
                 self.args
@@ -261,23 +261,20 @@ fn subs_tvars(
         .and_then(|sub_params| {
             PyTupleRef::try_from_object(vm, sub_params)
                 .ok()
-                .and_then(|sub_params| {
-                    if sub_params.len() > 0 {
-                        let sub_args = sub_params
-                            .iter()
-                            .map(|arg| {
-                                if let Some(idx) = tuple_index(params, arg) {
-                                    argitems[idx].clone()
-                                } else {
-                                    arg.clone()
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        let sub_args: PyObjectRef = PyTuple::new_ref(sub_args, &vm.ctx).into();
-                        Some(obj.get_item(&*sub_args, vm))
-                    } else {
-                        None
-                    }
+                .filter(|sub_params| !sub_params.is_empty())
+                .map(|sub_params| {
+                    let sub_args = sub_params
+                        .iter()
+                        .map(|arg| {
+                            if let Some(idx) = tuple_index(params, arg) {
+                                argitems[idx].clone()
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let sub_args: PyObjectRef = PyTuple::new_ref(sub_args, &vm.ctx).into();
+                    obj.get_item(&*sub_args, vm)
                 })
         })
         .unwrap_or(Ok(obj))
@@ -328,7 +325,7 @@ pub fn subs_parameters<F: Fn(&VirtualMachine) -> PyResult<String>>(
 
 impl AsMapping for PyGenericAlias {
     fn as_mapping() -> &'static PyMappingMethods {
-        static AS_MAPPING: Lazy<PyMappingMethods> = Lazy::new(|| PyMappingMethods {
+        static AS_MAPPING: LazyLock<PyMappingMethods> = LazyLock::new(|| PyMappingMethods {
             subscript: atomic_func!(|mapping, needle, vm| {
                 PyGenericAlias::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
             }),

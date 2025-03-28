@@ -1,3 +1,5 @@
+// cspell:disable
+
 use crate::{PyRef, VirtualMachine, builtins::PyModule};
 
 pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
@@ -182,10 +184,7 @@ pub(crate) mod _signal {
             siginterrupt(signalnum, 1);
         }
 
-        let old_handler = std::mem::replace(
-            &mut signal_handlers.borrow_mut()[signalnum as usize],
-            Some(handler),
-        );
+        let old_handler = signal_handlers.borrow_mut()[signalnum as usize].replace(handler);
         Ok(old_handler)
     }
 

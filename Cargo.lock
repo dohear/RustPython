@@ -2319,6 +2319,7 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "malachite-bigint",
+ "memchr",
  "num-complex",
  "num-traits",
  "ruff_python_ast",
@@ -2330,6 +2331,7 @@ dependencies = [
  "rustpython-compiler-core",
  "rustpython-compiler-source",
  "thiserror 2.0.11",
+ "unicode_names2",
 ]
 
 [[package]]
@@ -2338,6 +2340,7 @@ version = "0.4.0"
 dependencies = [
  "ascii",
  "bitflags 2.8.0",
+ "bstr",
  "cfg-if",
  "itertools 0.14.0",
  "libc",
@@ -2345,7 +2348,7 @@ dependencies = [
  "malachite-base",
  "malachite-bigint",
  "malachite-q",
- "num-complex",
+ "memchr",
  "num-traits",
  "once_cell",
  "parking_lot",
@@ -2353,6 +2356,7 @@ dependencies = [
  "rand 0.9.0",
  "rustpython-literal",
  "siphasher 0.3.11",
+ "unicode_names2",
  "volatile",
  "widestring",
  "windows-sys 0.59.0",
@@ -2384,6 +2388,7 @@ dependencies = [
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_source_file",
+ "rustpython-common",
  "serde",
 ]
 
@@ -2410,7 +2415,6 @@ version = "0.4.0"
 dependencies = [
  "itertools 0.14.0",
  "maplit",
- "once_cell",
  "proc-macro2",
  "quote",
  "rustpython-compiler-core",
@@ -2472,6 +2476,7 @@ dependencies = [
  "criterion",
  "num_enum",
  "optional",
+ "rustpython-common",
 ]
 
 [[package]]
@@ -2512,7 +2517,6 @@ dependencies = [
  "num-integer",
  "num-traits",
  "num_enum",
- "once_cell",
  "openssl",
  "openssl-probe",
  "openssl-sys",
@@ -2533,7 +2537,6 @@ dependencies = [
  "system-configuration",
  "tcl",
  "termios",
- "thread_local",
  "tk",
  "ucd",
  "unic-char-property",
