@@ -184,6 +184,7 @@ pub enum JitType {
     Int,
     Float,
     Bool,
+    Object,
 }
 
 impl JitType {
@@ -192,6 +193,7 @@ impl JitType {
             Self::Int => types::I64,
             Self::Float => types::F64,
             Self::Bool => types::I8,
+            Self::Object => types::I64, // Objects are represented as pointers (64-bit)
         }
     }
 
@@ -200,6 +202,7 @@ impl JitType {
             Self::Int => libffi::middle::Type::i64(),
             Self::Float => libffi::middle::Type::f64(),
             Self::Bool => libffi::middle::Type::u8(),
+            Self::Object => libffi::middle::Type::pointer(),
         }
     }
 }
@@ -297,6 +300,7 @@ impl UnTypedAbiValue {
                 JitType::Int => AbiValue::Int(self.int),
                 JitType::Float => AbiValue::Float(self.float),
                 JitType::Bool => AbiValue::Bool(self.boolean != 0),
+                JitType::Object => AbiValue::Int(self.int),
             }
         }
     }

@@ -282,13 +282,17 @@ mod _winapi {
     }
 
     #[pyfunction]
-    fn OpenProcess(desired_access: u32, inherit_handle: bool, process_id: u32) -> isize {
+    fn OpenProcess(
+        desired_access: u32,
+        inherit_handle: bool,
+        process_id: u32,
+    ) -> windows_sys::Win32::Foundation::HANDLE {
         unsafe {
             windows_sys::Win32::System::Threading::OpenProcess(
                 desired_access,
                 BOOL::from(inherit_handle),
                 process_id,
-            ) as _
+            )
         }
     }
 
@@ -504,13 +508,11 @@ mod _winapi {
         // if handle.is_invalid() {
         //     return Err(errno_err(vm));
         // }
-        Ok(handle as _)
+        Ok(handle)
     }
 
     #[pyfunction]
     fn ReleaseMutex(handle: isize) -> WindowsSysResult<BOOL> {
-        WindowsSysResult(unsafe {
-            windows_sys::Win32::System::Threading::ReleaseMutex(handle as _)
-        })
+        WindowsSysResult(unsafe { windows_sys::Win32::System::Threading::ReleaseMutex(handle) })
     }
 }

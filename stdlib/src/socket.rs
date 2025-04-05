@@ -39,7 +39,14 @@ mod _socket {
         pub use windows_sys::Win32::Networking::WinSock::{
             INADDR_ANY, INADDR_BROADCAST, INADDR_LOOPBACK, INADDR_NONE,
         };
-
+        pub use winapi::um::winsock2::{
+            SO_EXCLUSIVEADDRUSE, getprotobyname, getservbyname, getservbyport, getsockopt,
+            setsockopt,
+        };
+        pub use winapi::um::ws2tcpip::{
+            EAI_AGAIN, EAI_BADFLAGS, EAI_FAIL, EAI_FAMILY, EAI_MEMORY, EAI_NODATA, EAI_NONAME,
+            EAI_SERVICE, EAI_SOCKTYPE,
+        };
         pub use windows_sys::Win32::Networking::WinSock::{
             AF_APPLETALK, AF_DECnet, AF_IPX, AF_LINK, AI_ADDRCONFIG, AI_ALL, AI_CANONNAME,
             AI_NUMERICSERV, AI_V4MAPPED, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, IP_HDRINCL,
@@ -60,17 +67,6 @@ mod _socket {
             SO_USELOOPBACK, SOCK_DGRAM, SOCK_RAW, SOCK_RDM, SOCK_SEQPACKET, SOCK_STREAM,
             SOL_SOCKET, SOMAXCONN, TCP_NODELAY, WSAEBADF, WSAECONNRESET, WSAENOTSOCK,
             WSAEWOULDBLOCK,
-        };
-        pub use windows_sys::Win32::Networking::WinSock::{
-            SO_REUSEADDR as SO_EXCLUSIVEADDRUSE, getprotobyname, getservbyname, getservbyport,
-            getsockopt, setsockopt,
-        };
-        pub use windows_sys::Win32::Networking::WinSock::{
-            WSA_NOT_ENOUGH_MEMORY as EAI_MEMORY, WSAEAFNOSUPPORT as EAI_FAMILY,
-            WSAEINVAL as EAI_BADFLAGS, WSAESOCKTNOSUPPORT as EAI_SOCKTYPE,
-            WSAHOST_NOT_FOUND as EAI_NODATA, WSAHOST_NOT_FOUND as EAI_NONAME,
-            WSANO_RECOVERY as EAI_FAIL, WSATRY_AGAIN as EAI_AGAIN,
-            WSATYPE_NOT_FOUND as EAI_SERVICE,
         };
         pub const IF_NAMESIZE: usize =
             windows_sys::Win32::NetworkManagement::Ndis::IF_MAX_STRING_SIZE as _;
