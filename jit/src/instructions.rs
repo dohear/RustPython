@@ -1,6 +1,4 @@
 use std::ptr::NonNull;
-use crate::Jit;
-
 use super::{JitCompileError, JitSig, JitType};
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
@@ -737,19 +735,6 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             Instruction::StoreAttr { idx } => {
                 let value = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
                 let obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                JitValue::Object(class_ref) => {
-                    // Handle case where we're calling a class to create an instance
-                    let class_name = class_ref.get_class_name();
-                    
-                    // Create a new instance with the same class name
-                    let mut instance_ref = JitObjectRef::new(16);
-                    if let Some(name) = class_name {
-                        instance_ref.set_class_name(name);
-                    }
-                    
-                    self.stack.push(JitValue::Object(instance_ref));
-                    Ok(())
-                },
                 if let JitValue::Object(mut obj_ref) = obj {
                     let attr_name = &bytecode.names[idx.get(arg) as usize];
                     let attr_idx = self.get_attribute_index(attr_name)?;
@@ -787,10 +772,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 let flags_value = flags.get(arg);
                 
                 // Pop the qualified name (function name)
-                let qualified_name = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                let _qualified_name = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
                 
                 // Pop the code object
-                let code_obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                let _code_obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
                 
                 // Handle optional flags if present
                 if flags_value.contains(bytecode::MakeFunctionFlags::CLOSURE) {
@@ -834,7 +819,6 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 
                 Ok(())
             }
-            /*
             Instruction::CallFunctionPositional { nargs } => {
                 let nargs_value = nargs.get(arg) as usize;
                 let args = self.pop_multiple(nargs_value);
@@ -858,6 +842,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                                 // In a real implementation, you'd look up this constant
                                 format!("Class_{}", val)
                             },
+                            JitValue::Str(s)=> s.clone(),
                             JitValue::None => "AnonymousClass".to_string(),
                             // Add more cases as needed for other JitValue types
                             _ => "UnnamedClass".to_string()
@@ -871,7 +856,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                         self.stack.push(JitValue::Object(obj_ref));
                         Ok(())
                     },
-                    JitValue::FuncRef(func_ref) => {
+                    JitValue::FuncRef(_func_ref) => {
                         // For normal function calls
                         // In a simple implementation, we might just execute the function directly
                         
@@ -894,7 +879,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     },
                     _ => Err(JitCompileError::NotSupported),
                 }
-            } */
+            } 
             _ => Err(JitCompileError::NotSupported),
         }
     }
@@ -902,21 +887,16 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
     fn extract_class_name<C: bytecode::Constant>(
         &self,
-        bytecode: &CodeObject<C>,
+        _bytecode: &CodeObject<C>,
         value: &JitValue,
     ) -> Option<String> {
         // ToDo: prolly need more cases?
         match value {
-            JitValue::Int(val) => {
-                let idx = *val;
-                if idx < bytecode.constants.len() {
-                    match bytecode.constants[idx].borrow_constant() {
-                        BorrowedConstant::String {value} => Some(value.to_string()),
-                        _ => None, 
-                    }
-                } else {
-                    None
-                }
+            JitValue::Str(s) => Some(s.clone()),
+            JitValue::Int(_) => {
+                // We can't easily get the constant value from a Cranelift Value
+                // In a real implementation, this would need to be handled differently
+                None
             },
             _ => None,
         }
