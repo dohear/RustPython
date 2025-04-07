@@ -48,6 +48,7 @@ enum JitValue {
     FuncRef(FuncRef),
     Object(JitObjectRef),
     BuildClassFunc, 
+    Str(String),
 }
 
 impl JitObject {
@@ -160,14 +161,14 @@ impl JitValue {
             JitValue::Int(_) => Some(JitType::Int),
             JitValue::Float(_) => Some(JitType::Float),
             JitValue::Bool(_) => Some(JitType::Bool),
-            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_) | JitValue::BuildClassFunc => None,
+            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_) | JitValue::BuildClassFunc | JitValue::Str(_)=> None,
         }
     }
 
     fn into_value(self) -> Option<Value> {
         match self {
             JitValue::Int(val) | JitValue::Float(val) | JitValue::Bool(val) => Some(val),
-            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_)  | JitValue::BuildClassFunc  => None,
+            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_)  | JitValue::BuildClassFunc | JitValue::Str(_)  => None,
         }
     }
 }
@@ -265,7 +266,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             JitValue::Bool(val) => Ok(val),
             JitValue::None => Ok(self.builder.ins().iconst(types::I8, 0)),
-            JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_) | JitValue::BuildClassFunc => Err(JitCompileError::NotSupported),
+            JitValue::Tuple(_) | JitValue::FuncRef(_) | JitValue::Object(_) | JitValue::BuildClassFunc| JitValue::Str(_) =>Err(JitCompileError::NotSupported),
         }
     }
 
@@ -363,6 +364,9 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 // For now, we'll just treat code objects as opaque values
                 // that can be passed around but not executed directly
                 JitValue::None // Or create a special JitValue::Code variant
+            }
+            BorrowedConstant::Str { value  } => {
+                JitValue::Str(value.to_string())
             }
             _ => return Err(JitCompileError::NotSupported),
         };
