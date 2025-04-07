@@ -337,7 +337,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         }
         Ok(())
     }
-
+    // Look at this when you fix your return statments
     fn prepare_const<C: bytecode::Constant>(
         &mut self,
         constant: BorrowedConstant<'_, C>,
@@ -370,6 +370,25 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     }
 
     fn return_value(&mut self, val: JitValue) -> Result<(), JitCompileError> {
+        
+        if matches!(val, JitValue::None) {
+            // For None, we can return a zero value or another default
+            let zero = self.builder.ins().iconst(types::I64, 0);
+            self.builder.ins().return_(&[zero]);
+            
+            // Set return type if not already set
+            if self.sig.ret.is_none() {
+                self.sig.ret = Some(JitType::Int);
+                self.builder
+                    .func
+                    .signature
+                    .returns
+                    .push(AbiParam::new(JitType::Int.to_cranelift()));
+            }
+            
+            return Ok(());
+        }
+        
         if let Some(ref ty) = self.sig.ret {
             // If the signature has a return type, enforce it
             if val.to_jit_type().as_ref() != Some(ty) {
@@ -705,6 +724,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     Ok(())
                 }
             }
+            
             Instruction::LoadBuildClass => {
                 // Create a special JitValue that represents the __build_class__ function
                 self.stack.push(JitValue::BuildClassFunc);
@@ -810,6 +830,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 
                 Ok(())
             }
+            /*
             Instruction::CallFunctionPositional { nargs } => {
                 let nargs_value = nargs.get(arg) as usize;
                 let args = self.pop_multiple(nargs_value);
@@ -869,7 +890,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     },
                     _ => Err(JitCompileError::NotSupported),
                 }
-            }
+            } */
             _ => Err(JitCompileError::NotSupported),
         }
     }
