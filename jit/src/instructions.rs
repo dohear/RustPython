@@ -31,6 +31,7 @@ struct Local {
 struct JitObject {
     locals: Box<[Option<JitValue>]>, //create an array of possible JIT Values to store in locals
     field_count: usize,
+    class_name: Option<String>,
 }
 #[derive(Debug)]
 struct JitObjectRef {
@@ -54,7 +55,13 @@ impl JitObject {
         JitObject { 
             locals: vec![None; field_count].into_boxed_slice(),
             field_count,
+            class_name: None,
         }
+    }
+
+    fn with_class_name(mut self, name: String) -> Self {
+        self.class_name = Some(name);
+        self
     }
     
     fn get_field(&self, idx: usize) -> Option<&JitValue> {
@@ -72,6 +79,16 @@ impl JitObject {
         } else {
             false
         }
+    }
+
+    fn debug_info(&self) -> String {
+        let class_info = if let Some(name) = &self.class_name {
+            format!("class '{}'", name)
+        } else {
+            "anonymous class".to_string()
+        };
+        
+        format!("<{} with {} fields>", class_info, self.field_count)
     }
 }
 
@@ -97,6 +114,16 @@ impl JitObjectRef {
         F: FnOnce(&mut JitObject) -> R 
     {
         unsafe { f(self.ptr.as_mut()) }
+    }
+
+    fn set_class_name(&mut self, name: String) {
+        self.with_object_mut(|obj| {
+            obj.class_name = Some(name);
+        });
+    }
+    
+    fn get_class_name(&self) -> Option<String> {
+        self.with_object(|obj| obj.class_name.clone())
     }
 }
 
@@ -678,47 +705,6 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     Ok(())
                 }
             }
-            Instruction::CallFunctionPositional { nargs } => {
-                let nargs_value = nargs.get(arg) as usize;
-
-                let args = self.pop_multiple(nargs_value);
-                let func = self.stack.pop().or_ok(JitCompileError::BadBytecode)?;
-
-                match func {
-                    JitValue::BuildClassFunc => {
-                        if args.len() < 2 {
-                            return Err(JitCompileError::BadBytecode);
-                        }
-                        let class_name = match &args[1] {
-                            JitValue::Int(val) => {
-                                format!("Class_{}", val)
-                            },
-                            JitValue::None => "AnonymousClass".to_string(),
-                            _ => "UnnamedClass".to_string()
-                        };
-
-                        let mut obj_ref = JitObjectRef::new(16); //default size ?
-                        obj_ref.set_class_name(class_name);
-
-                        self.stack.push(JitValue::Object(obj_ref));
-                        Ok(())
-                    },
-                    JitValue::FuncRef(func_ref) => {
-                        self.stack.push(JitValue::None);
-                        Ok(())
-                    },
-                    JitValue::Object(class_ref) => {
-                        let class_name = class_ref.get_class_name();
-                        let mut intstance_ref = JitObjectRef::new(16);
-                        if let Some(name) = class_name {
-                            intstance_ref.set_class_name(name);
-                        }
-                        self.stack.push(JitValue::Object(intstance_ref));
-                        Ok(())
-                    },
-                    _ => Err(JitCompileError::NotSupported),
-                }
-            }
             Instruction::LoadBuildClass => {
                 // Create a special JitValue that represents the __build_class__ function
                 self.stack.push(JitValue::BuildClassFunc);
@@ -727,7 +713,19 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             Instruction::StoreAttr { idx } => {
                 let value = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
                 let obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                
+                JitValue::Object(class_ref) => {
+                    // Handle case where we're calling a class to create an instance
+                    let class_name = class_ref.get_class_name();
+                    
+                    // Create a new instance with the same class name
+                    let mut instance_ref = JitObjectRef::new(16);
+                    if let Some(name) = class_name {
+                        instance_ref.set_class_name(name);
+                    }
+                    
+                    self.stack.push(JitValue::Object(instance_ref));
+                    Ok(())
+                },
                 if let JitValue::Object(mut obj_ref) = obj {
                     let attr_name = &bytecode.names[idx.get(arg) as usize];
                     let attr_idx = self.get_attribute_index(attr_name)?;
@@ -823,149 +821,30 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     JitValue::BuildClassFunc => {
                         // Handle the class building operation
                         // For a simple case with nargs == 2:
-                        if args.len() == 2 {
-                            // args[0] should be the function defining the class body
-                            // args[1] should be the class name
-                            
-                            // Create a new object with default fields
-                            let obj_ref = JitObjectRef::new(8); // Arbitrary field count
-                            
-                            // Push the new object to the stack
-                            self.stack.push(JitValue::Object(obj_ref));
-                            Ok(())
-                        } else {
-                            Err(JitCompileError::NotSupported)
-                        }
-                    },
-                    JitValue::FuncRef(func_ref) => {
-                        // For normal function calls
-                        // In a simple implementation, we might just execute the function directly
-                        
-                        // This is a placeholder - actual implementation would depend on your architecture
-                        self.stack.push(JitValue::None); // Push a placeholder result
-                        Ok(())
-                    },
-                    _ => Err(JitCompileError::NotSupported),
-                }
-            }
-            Instruction::LoadBuildClass => {
-                // Create a special JitValue that represents the __build_class__ function
-                let build_class_func = JitValue::BuildClassFunc;
-                self.stack.push(build_class_func);
-                Ok(())
-            }
-            Instruction::StoreAttr { idx } => {
-                let value = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                let obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                
-                if let JitValue::Object(mut obj_ref) = obj {
-                    let attr_name = &bytecode.names[idx.get(arg) as usize];
-                    let attr_idx = self.get_attribute_index(attr_name)?;
-                    
-                    obj_ref.with_object_mut(|o| {
-                        if !o.set_field(attr_idx, value.clone()) {
+                        if args.len() < 2 {
                             return Err(JitCompileError::BadBytecode);
                         }
+                        
+                        // Extract the class name (second argument)
+                        let class_name = match &args[1] {
+                            JitValue::Int(val) => {
+                                // The class name is often stored as a constant
+                                // For simplicity, let's convert the int value to a string
+                                // In a real implementation, you'd look up this constant
+                                format!("Class_{}", val)
+                            },
+                            JitValue::None => "AnonymousClass".to_string(),
+                            // Add more cases as needed for other JitValue types
+                            _ => "UnnamedClass".to_string()
+                        };
+                        
+                        // Create a new object with the class name
+                        let mut obj_ref = JitObjectRef::new(16); // Default size
+                        obj_ref.set_class_name(class_name);
+                        
+                        // Push the new object to the stack
+                        self.stack.push(JitValue::Object(obj_ref));
                         Ok(())
-                    })?;
-                    
-                    Ok(())
-                } else {
-                    Err(JitCompileError::NotSupported)
-                }
-            }
-            Instruction::LoadAttr { idx } => {
-                let obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                
-                if let JitValue::Object(obj_ref) = obj {
-                    let attr_name = &bytecode.names[idx.get(arg) as usize];
-                    let attr_idx = self.get_attribute_index(attr_name)?; // You'll need to implement this
-                    
-                    let value = obj_ref.with_object(|o| {
-                        o.get_field(attr_idx).cloned().ok_or(JitCompileError::BadBytecode)
-                    })?;
-                    
-                    self.stack.push(value);
-                    Ok(())
-                } else {
-                    Err(JitCompileError::NotSupported)
-                }
-            }
-            Instruction::MakeFunction(flags) => {
-                let flags_value = flags.get(arg);
-                
-                // Pop the qualified name (function name)
-                let qualified_name = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                
-                // Pop the code object
-                let code_obj = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                
-                // Handle optional flags if present
-                if flags_value.contains(bytecode::MakeFunctionFlags::CLOSURE) {
-                    // Pop closure tuple
-                    let _closure = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                    // For now, we don't actually use the closure
-                }
-                
-                if flags_value.contains(bytecode::MakeFunctionFlags::ANNOTATIONS) {
-                    // Pop annotations dict
-                    let _annotations = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                    // For now, we don't use the annotations
-                }
-                
-                if flags_value.contains(bytecode::MakeFunctionFlags::KW_ONLY_DEFAULTS) {
-                    // Pop keyword-only defaults
-                    let _kw_defaults = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                    // For now, we don't use these
-                }
-                
-                if flags_value.contains(bytecode::MakeFunctionFlags::DEFAULTS) {
-                    // Pop defaults tuple
-                    let _defaults = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                    // For now, we don't use defaults
-                }
-                
-                if flags_value.contains(bytecode::MakeFunctionFlags::TYPE_PARAMS) {
-                    // Pop type parameters tuple
-                    let _type_params = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                    // For now, we don't use type parameters
-                }
-                
-                // For a simple implementation, we'll just create a wrapper around the code object
-                // In a real implementation, you'd want to compile the function
-                
-                // Create a function object (for now just using the existing function reference)
-                let func_value = JitValue::FuncRef(func_ref);
-                
-                // Push it onto the stack
-                self.stack.push(func_value);
-                
-                Ok(())
-            }
-            Instruction::CallFunctionPositional { nargs } => {
-                let nargs_value = nargs.get(arg) as usize;
-                let args = self.pop_multiple(nargs_value);
-                
-                // Get the function itself
-                let func = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                
-                match func {
-                    JitValue::BuildClassFunc => {
-                        // Handle the class building operation
-                        // For a simple case with nargs == 2:
-                        if args.len() == 2 {
-                            // args[0] should be the function defining the class body
-                            // args[1] should be the class name
-                            
-                            // Create a new object with default fields
-                            let obj_ref = JitObjectRef::new(8); // Arbitrary field count
-                            
-                            // Push the new object to the stack
-                            self.stack.push(JitValue::Object(obj_ref));
-                            Ok(())
-                        } else {
-                            Err(JitCompileError::NotSupported)
-                        }
                     },
                     JitValue::FuncRef(func_ref) => {
                         // For normal function calls
@@ -973,12 +852,48 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                         
                         // This is a placeholder - actual implementation would depend on your architecture
                         self.stack.push(JitValue::None); // Push a placeholder result
+                        Ok(())
+                    },
+                    JitValue::Object(class_ref) => {
+                        // Handle case where we're calling a class to create an instance
+                        let class_name = class_ref.get_class_name();
+                        
+                        // Create a new instance with the same class name
+                        let mut instance_ref = JitObjectRef::new(16);
+                        if let Some(name) = class_name {
+                            instance_ref.set_class_name(name);
+                        }
+                        
+                        self.stack.push(JitValue::Object(instance_ref));
                         Ok(())
                     },
                     _ => Err(JitCompileError::NotSupported),
                 }
             }
             _ => Err(JitCompileError::NotSupported),
+        }
+    }
+
+
+    fn extract_class_name<C: bytecode::Constant>(
+        &self,
+        bytecode: &CodeObject<C>,
+        value: &JitValue,
+    ) -> Option<String> {
+        // ToDo: prolly need more cases?
+        match value {
+            JitValue::Int(val) => {
+                let idx = *val;
+                if idx < bytecode.constants.len() {
+                    match bytecode.constants[idx].borrow_constant() {
+                        BorrowedConstant::String {value} => Some(value.to_string()),
+                        _ => None, 
+                    }
+                } else {
+                    None
+                }
+            },
+            _ => None,
         }
     }
 
