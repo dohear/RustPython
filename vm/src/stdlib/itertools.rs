@@ -87,7 +87,7 @@ mod decl {
         fn setstate(zelf: PyRef<Self>, state: PyTupleRef, vm: &VirtualMachine) -> PyResult<()> {
             let args = state.as_slice();
             if args.is_empty() {
-                let msg = String::from("function takes at leat 1 arguments (0 given)");
+                let msg = String::from("function takes at least 1 arguments (0 given)");
                 return Err(vm.new_type_error(msg));
             }
             if args.len() > 2 {
@@ -1087,7 +1087,7 @@ mod decl {
     #[derive(Debug, PyPayload)]
     struct PyItertoolsAccumulate {
         iterable: PyIter,
-        binop: Option<PyObjectRef>,
+        bin_op: Option<PyObjectRef>,
         initial: Option<PyObjectRef>,
         acc_value: PyRwLock<Option<PyObjectRef>>,
     }
@@ -1107,7 +1107,7 @@ mod decl {
         fn py_new(cls: PyTypeRef, args: AccumulateArgs, vm: &VirtualMachine) -> PyResult {
             PyItertoolsAccumulate {
                 iterable: args.iterable,
-                binop: args.func.flatten(),
+                bin_op: args.func.flatten(),
                 initial: args.initial.flatten(),
                 acc_value: PyRwLock::new(None),
             }
@@ -1127,7 +1127,7 @@ mod decl {
         #[pymethod(magic)]
         fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyTupleRef {
             let class = zelf.class().to_owned();
-            let binop = zelf.binop.clone();
+            let bin_op = zelf.bin_op.clone();
             let it = zelf.iterable.clone();
             let acc_value = zelf.acc_value.read().clone();
             if let Some(initial) = &zelf.initial {
@@ -1136,7 +1136,7 @@ mod decl {
                     source: PyRwLock::new(Some(chain_args.to_pyobject(vm).get_iter(vm).unwrap())),
                     active: PyRwLock::new(None),
                 };
-                let tup = vm.new_tuple((chain, binop));
+                let tup = vm.new_tuple((chain, bin_op));
                 return vm.new_tuple((class, tup, acc_value));
             }
             match acc_value {
@@ -1151,7 +1151,7 @@ mod decl {
                     .into_pyobject(vm);
                     let acc = Self {
                         iterable: PyIter::new(chain),
-                        binop,
+                        bin_op,
                         initial: None,
                         acc_value: PyRwLock::new(None),
                     };
@@ -1161,7 +1161,7 @@ mod decl {
                 }
                 _ => {}
             }
-            let tup = vm.new_tuple((it, binop));
+            let tup = vm.new_tuple((it, bin_op));
             vm.new_tuple((class, tup, acc_value))
         }
     }
@@ -1191,7 +1191,7 @@ mod decl {
                             return Ok(PyIterReturn::StopIteration(v));
                         }
                     };
-                    match &zelf.binop {
+                    match &zelf.bin_op {
                         None => vm._add(&value, &obj)?,
                         Some(op) => op.call((value, obj), vm)?,
                     }
@@ -1892,14 +1892,14 @@ mod decl {
                 return Ok(PyIterReturn::StopIteration(None));
             }
             let mut result: Vec<PyObjectRef> = Vec::new();
-            let mut numactive = zelf.iterators.len();
+            let mut num_active = zelf.iterators.len();
 
             for idx in 0..zelf.iterators.len() {
                 let next_obj = match zelf.iterators[idx].next(vm)? {
                     PyIterReturn::Return(obj) => obj,
                     PyIterReturn::StopIteration(v) => {
-                        numactive -= 1;
-                        if numactive == 0 {
+                        num_active -= 1;
+                        if num_active == 0 {
                             return Ok(PyIterReturn::StopIteration(v));
                         }
                         zelf.fillvalue.read().clone()

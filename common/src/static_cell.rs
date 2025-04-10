@@ -13,7 +13,7 @@ mod non_threading {
 
     impl<T> StaticCell<T> {
         #[doc(hidden)]
-        pub const fn _from_localkey(inner: &'static LocalKey<OnceCell<&'static T>>) -> Self {
+        pub const fn _from_local_key(inner: &'static LocalKey<OnceCell<&'static T>>) -> Self {
             Self { inner }
         }
 
@@ -56,9 +56,11 @@ mod non_threading {
             $($(#[$attr])*
             $vis static $name: $crate::static_cell::StaticCell<$t> = {
                 ::std::thread_local! {
-                     $vis static $name: $crate::lock::OnceCell<&'static $t> = $crate::lock::OnceCell::new();
+                     $vis static $name: $crate::lock::OnceCell<&'static $t> = const {
+                         $crate::lock::OnceCell::new()
+                     };
                 }
-                $crate::static_cell::StaticCell::_from_localkey(&$name)
+                $crate::static_cell::StaticCell::_from_local_key(&$name)
             };)+
         };
     }
@@ -76,7 +78,7 @@ mod threading {
 
     impl<T> StaticCell<T> {
         #[doc(hidden)]
-        pub const fn _from_oncecell(inner: OnceCell<T>) -> Self {
+        pub const fn _from_once_cell(inner: OnceCell<T>) -> Self {
             Self { inner }
         }
 
@@ -108,7 +110,7 @@ mod threading {
         ($($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty;)+) => {
             $($(#[$attr])*
             $vis static $name: $crate::static_cell::StaticCell<$t> =
-                $crate::static_cell::StaticCell::_from_oncecell($crate::lock::OnceCell::new());)+
+                $crate::static_cell::StaticCell::_from_once_cell($crate::lock::OnceCell::new());)+
         };
     }
 }

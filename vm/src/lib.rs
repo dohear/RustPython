@@ -1,9 +1,10 @@
-//! This crate contains most python logic.
+//! This crate contains most of the python logic.
 //!
-//! - Compilation
-//! - Bytecode
+//! - Interpreter
 //! - Import mechanics
 //! - Base objects
+//!
+//! Some stdlib modules are implemented here, but most of them are in the `rustpython-stdlib` module. The
 
 // to allow `mod foo {}` in foo.rs; clippy thinks this is a mistake/misunderstanding of
 // how `mod` works, but we want this sometimes for pymodule declarations
@@ -43,14 +44,14 @@ mod anystr;
 pub mod buffer;
 pub mod builtins;
 pub mod byte;
-mod bytesinner;
+mod bytes_inner;
 pub mod cformat;
 pub mod class;
 mod codecs;
 pub mod compiler;
 pub mod convert;
 mod coroutine;
-mod dictdatatype;
+mod dict_inner;
 #[cfg(feature = "rustpython-compiler")]
 pub mod eval;
 pub mod exceptions;

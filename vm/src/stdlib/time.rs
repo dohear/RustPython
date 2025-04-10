@@ -1,3 +1,4 @@
+//cspell:ignore cfmt
 //! The python `time` module.
 
 // See also:
@@ -242,8 +243,8 @@ mod decl {
         let timestamp = match value {
             Either::A(float) => {
                 let secs = float.trunc() as i64;
-                let nsecs = (float.fract() * 1e9) as u32;
-                DateTime::<chrono::offset::Utc>::from_timestamp(secs, nsecs)
+                let nano_secs = (float.fract() * 1e9) as u32;
+                DateTime::<chrono::offset::Utc>::from_timestamp(secs, nano_secs)
             }
             Either::B(int) => DateTime::<chrono::offset::Utc>::from_timestamp(int, 0),
         };
@@ -377,10 +378,10 @@ mod decl {
 
     #[cfg(any(windows, all(target_arch = "wasm32", target_os = "emscripten")))]
     pub(super) fn time_muldiv(ticks: i64, mul: i64, div: i64) -> u64 {
-        let intpart = ticks / div;
+        let int_part = ticks / div;
         let ticks = ticks % div;
         let remaining = (ticks * mul) / div;
-        (intpart * mul + remaining) as u64
+        (int_part * mul + remaining) as u64
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "emscripten"))]

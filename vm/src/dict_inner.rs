@@ -1,7 +1,7 @@
 //! Ordered dictionary implementation.
-//! Inspired by: https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html
-//! And: https://www.youtube.com/watch?v=p33CVV29OG8
-//! And: http://code.activestate.com/recipes/578375/
+//! Inspired by: <https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html>
+//! And: <https://www.youtube.com/watch?v=p33CVV29OG8>
+//! And: <http://code.activestate.com/recipes/578375/>
 
 use crate::{
     AsObject, Py, PyExact, PyObject, PyObjectRef, PyRefExact, PyResult, VirtualMachine,
@@ -20,7 +20,7 @@ use num_traits::ToPrimitive;
 use std::{fmt, mem::size_of, ops::ControlFlow};
 
 // HashIndex is intended to be same size with hash::PyHash
-// but it doesn't mean the values are compatible with actual pyhash value
+// but it doesn't mean the values are compatible with actual PyHash value
 
 /// hash value of an object returned by __hash__
 type HashValue = hash::PyHash;
@@ -691,7 +691,7 @@ impl<T: Clone> Dict<T> {
 type LookupResult = (IndexEntry, IndexIndex);
 
 /// Types implementing this trait can be used to index
-/// the dictionary. Typical usecases are:
+/// the dictionary. Typical use-cases are:
 /// - PyObjectRef -> arbitrary python type used as key
 /// - str -> string reference used as key, this is often used internally
 pub trait DictKey {

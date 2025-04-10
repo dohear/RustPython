@@ -389,15 +389,15 @@ mod _operator {
         type Args = FuncArgs;
 
         fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
-            let nattr = args.args.len();
+            let n_attr = args.args.len();
             // Check we get no keyword and at least one positional.
             if !args.kwargs.is_empty() {
                 return Err(vm.new_type_error("attrgetter() takes no keyword arguments".to_owned()));
             }
-            if nattr == 0 {
+            if n_attr == 0 {
                 return Err(vm.new_type_error("attrgetter expected 1 argument, got 0.".to_owned()));
             }
-            let mut attrs = Vec::with_capacity(nattr);
+            let mut attrs = Vec::with_capacity(n_attr);
             for o in args.args {
                 if let Ok(r) = o.try_into_value(vm) {
                     attrs.push(r);
@@ -532,9 +532,9 @@ mod _operator {
         fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
             // With no kwargs, return (type(obj), (name, *args)) tuple.
             if zelf.args.kwargs.is_empty() {
-                let mut pargs = vec![zelf.name.as_object().to_owned()];
-                pargs.append(&mut zelf.args.args.clone());
-                Ok(vm.new_tuple((zelf.class().to_owned(), vm.ctx.new_tuple(pargs))))
+                let mut py_args = vec![zelf.name.as_object().to_owned()];
+                py_args.append(&mut zelf.args.args.clone());
+                Ok(vm.new_tuple((zelf.class().to_owned(), vm.ctx.new_tuple(py_args))))
             } else {
                 // If we have kwargs, create a partial function that contains them and pass back that
                 // along with the args.

@@ -9,7 +9,7 @@ use crate::{
     anystr::{self, AnyStr},
     atomic_func,
     byte::{bytes_from_object, value_from_object},
-    bytesinner::{
+    bytes_inner::{
         ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions, ByteInnerSplitOptions,
         ByteInnerTranslateOptions, DecodeArgs, PyBytesInner, bytes_decode,
     },
@@ -375,7 +375,7 @@ impl PyByteArray {
                 Some(x) => x,
                 None => return Ok(false),
             };
-        substr.py_startsendswith(
+        substr.py_starts_ends_with(
             &affix,
             "endswith",
             "bytes",
@@ -396,7 +396,7 @@ impl PyByteArray {
                 Some(x) => x,
                 None => return Ok(false),
             };
-        substr.py_startsendswith(
+        substr.py_starts_ends_with(
             &affix,
             "startswith",
             "bytes",

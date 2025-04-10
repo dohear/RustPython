@@ -1,4 +1,5 @@
 use crate::common::{boxvec::BoxVec, lock::PyMutex};
+use crate::protocol::PyMapping;
 use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
     builtins::{
@@ -350,7 +351,7 @@ impl ExecutingFrame<'_> {
     fn run(&mut self, vm: &VirtualMachine) -> PyResult<ExecutionResult> {
         flame_guard!(format!("Frame::run({})", self.code.obj_name));
         // Execute until return or exception:
-        let instrs = &self.code.instructions;
+        let instructions = &self.code.instructions;
         let mut arg_state = bytecode::OpArgState::default();
         loop {
             let idx = self.lasti() as usize;
@@ -359,7 +360,7 @@ impl ExecutingFrame<'_> {
             //     self.code.locations[idx], self.code.source_path
             // );
             self.update_lasti(|i| *i += 1);
-            let bytecode::CodeUnit { op, arg } = instrs[idx];
+            let bytecode::CodeUnit { op, arg } = instructions[idx];
             let arg = arg_state.extend(arg);
             let mut do_extend_arg = false;
             let result = self.execute_instruction(op, arg, &mut do_extend_arg, vm);
@@ -520,6 +521,7 @@ impl ExecutingFrame<'_> {
         }
 
         match instruction {
+            bytecode::Instruction::Nop => Ok(None),
             bytecode::Instruction::LoadConst { idx } => {
                 self.push_value(self.code.constants[idx.get(arg) as usize].clone().into());
                 Ok(None)
@@ -670,11 +672,37 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::Subscript => self.execute_subscript(vm),
             bytecode::Instruction::StoreSubscript => self.execute_store_subscript(vm),
             bytecode::Instruction::DeleteSubscript => self.execute_delete_subscript(vm),
+            bytecode::Instruction::CopyItem { index } => {
+                let value = self
+                    .state
+                    .stack
+                    .len()
+                    .checked_sub(index.get(arg) as usize)
+                    .map(|i| &self.state.stack[i])
+                    .unwrap();
+                self.push_value(value.clone());
+                Ok(None)
+            }
             bytecode::Instruction::Pop => {
                 // Pop value from stack and ignore.
                 self.pop_value();
                 Ok(None)
             }
+            bytecode::Instruction::Swap { index } => {
+                let len = self.state.stack.len();
+                let i = len - 1;
+                let j = len - 1 - index.get(arg) as usize;
+                self.state.stack.swap(i, j);
+                Ok(None)
+            }
+            // bytecode::Instruction::ToBool => {
+            //     dbg!("Shouldn't be called outside of match statements for now")
+            //     let value = self.pop_value();
+            //     // call __bool__
+            //     let result = value.try_to_bool(vm)?;
+            //     self.push_value(vm.ctx.new_bool(result).into());
+            //     Ok(None)
+            // }
             bytecode::Instruction::Duplicate => {
                 // Duplicate top of stack
                 let value = self.top_value();
@@ -805,16 +833,32 @@ impl ExecutingFrame<'_> {
                 dict.set_item(&*key, value, vm)?;
                 Ok(None)
             }
-            bytecode::Instruction::BinaryOperation { op } => self.execute_binop(vm, op.get(arg)),
+            bytecode::Instruction::BinaryOperation { op } => self.execute_bin_op(vm, op.get(arg)),
             bytecode::Instruction::BinaryOperationInplace { op } => {
-                self.execute_binop_inplace(vm, op.get(arg))
+                self.execute_bin_op_inplace(vm, op.get(arg))
+            }
+            bytecode::Instruction::BinarySubscript => {
+                let key = self.pop_value();
+                let container = self.pop_value();
+                self.state
+                    .stack
+                    .push(container.get_item(key.as_object(), vm)?);
+                Ok(None)
             }
             bytecode::Instruction::LoadAttr { idx } => self.load_attr(vm, idx.get(arg)),
             bytecode::Instruction::StoreAttr { idx } => self.store_attr(vm, idx.get(arg)),
             bytecode::Instruction::DeleteAttr { idx } => self.delete_attr(vm, idx.get(arg)),
-            bytecode::Instruction::UnaryOperation { op } => self.execute_unop(vm, op.get(arg)),
+            bytecode::Instruction::UnaryOperation { op } => self.execute_unary_op(vm, op.get(arg)),
             bytecode::Instruction::TestOperation { op } => self.execute_test(vm, op.get(arg)),
             bytecode::Instruction::CompareOperation { op } => self.execute_compare(vm, op.get(arg)),
+            bytecode::Instruction::IsOperation(neg) => {
+                let a = self.pop_value();
+                let b = self.pop_value();
+                // xor with neg to invert the result if needed
+                let result = vm.ctx.new_bool(a.is(b.as_ref()) ^ neg.get(arg));
+                self.push_value(result.into());
+                Ok(None)
+            }
             bytecode::Instruction::ReturnValue => {
                 let value = self.pop_value();
                 self.unwind_blocks(vm, UnwindReason::Returning { value })
@@ -985,6 +1029,13 @@ impl ExecutingFrame<'_> {
                 let iterated_obj = self.pop_value();
                 let iter_obj = iterated_obj.get_iter(vm)?;
                 self.push_value(iter_obj.into());
+                Ok(None)
+            }
+            bytecode::Instruction::GetLen => {
+                // STACK.append(len(STACK[-1]))
+                let obj = self.top_value();
+                let len = obj.length(vm)?;
+                self.push_value(vm.ctx.new_int(len).into());
                 Ok(None)
             }
             bytecode::Instruction::GetAwaitable => {
@@ -1230,6 +1281,64 @@ impl ExecutingFrame<'_> {
                         .into_ref(&vm.ctx)
                         .into();
                 self.push_value(type_var_tuple);
+                Ok(None)
+            }
+            bytecode::Instruction::MatchMapping => {
+                // Pop the subject from stack
+                let subject = self.pop_value();
+
+                // Decide if it's a mapping, push True/False or handle error
+                let is_mapping = PyMapping::check(&subject);
+                self.push_value(vm.ctx.new_bool(is_mapping).into());
+                Ok(None)
+            }
+            bytecode::Instruction::MatchSequence => {
+                // Pop the subject from stack
+                let subject = self.pop_value();
+
+                // Decide if it's a sequence (but not a mapping)
+                let is_sequence = subject.to_sequence().check();
+                self.push_value(vm.ctx.new_bool(is_sequence).into());
+                Ok(None)
+            }
+            bytecode::Instruction::MatchKeys => {
+                // Typically we pop a sequence of keys first
+                let _keys = self.pop_value();
+                let subject = self.pop_value();
+
+                // Check if subject is a dict (or mapping) and all keys match
+                if let Ok(_dict) = subject.downcast::<PyDict>() {
+                    // Example: gather the values corresponding to keys
+                    // If keys match, push the matched values & success
+                    self.push_value(vm.ctx.new_bool(true).into());
+                } else {
+                    // Push a placeholder to indicate no match
+                    self.push_value(vm.ctx.new_bool(false).into());
+                }
+                Ok(None)
+            }
+            bytecode::Instruction::MatchClass(_arg) => {
+                // STACK[-1] is a tuple of keyword attribute names, STACK[-2] is the class being matched against, and STACK[-3] is the match subject.
+                // count is the number of positional sub-patterns.
+                // Pop STACK[-1], STACK[-2], and STACK[-3].
+                let names = self.pop_value();
+                let names = names.downcast_ref::<PyTuple>().unwrap();
+                let cls = self.pop_value();
+                let subject = self.pop_value();
+                // If STACK[-3] is an instance of STACK[-2] and has the positional and keyword attributes required by count and STACK[-1],
+                // push a tuple of extracted attributes.
+                if subject.is_instance(cls.as_ref(), vm)? {
+                    let mut extracted = vec![];
+                    for name in names.iter() {
+                        let name_str = name.downcast_ref::<PyStr>().unwrap();
+                        let value = subject.get_attr(name_str, vm)?;
+                        extracted.push(value);
+                    }
+                    self.push_value(vm.ctx.new_tuple(extracted).into());
+                } else {
+                    // Otherwise, push None.
+                    self.push_value(vm.ctx.none());
+                }
                 Ok(None)
             }
         }
@@ -1792,7 +1901,7 @@ impl ExecutingFrame<'_> {
     }
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
-    fn execute_binop(&mut self, vm: &VirtualMachine, op: bytecode::BinaryOperator) -> FrameResult {
+    fn execute_bin_op(&mut self, vm: &VirtualMachine, op: bytecode::BinaryOperator) -> FrameResult {
         let b_ref = &self.pop_value();
         let a_ref = &self.pop_value();
         let value = match op {
@@ -1814,7 +1923,7 @@ impl ExecutingFrame<'_> {
         self.push_value(value);
         Ok(None)
     }
-    fn execute_binop_inplace(
+    fn execute_bin_op_inplace(
         &mut self,
         vm: &VirtualMachine,
         op: bytecode::BinaryOperator,
@@ -1842,7 +1951,11 @@ impl ExecutingFrame<'_> {
     }
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
-    fn execute_unop(&mut self, vm: &VirtualMachine, op: bytecode::UnaryOperator) -> FrameResult {
+    fn execute_unary_op(
+        &mut self,
+        vm: &VirtualMachine,
+        op: bytecode::UnaryOperator,
+    ) -> FrameResult {
         let a = self.pop_value();
         let value = match op {
             bytecode::UnaryOperator::Minus => vm._neg(&a)?,

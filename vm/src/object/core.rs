@@ -1,14 +1,14 @@
 //! Essential types for object models
 //!
-//! +-------------------------+--------------+---------------+
-//! |       Management        |    Typed     |    Untyped    |
-//! +-------------------------+--------------+---------------+
-//! | Interpreter-independent | Py<T>        | PyObject      |
-//! | Reference-counted       | PyRef<T>     | PyObjectRef   |
-//! | Weak                    | PyWeakRef<T> | PyRef<PyWeak> |
-//! +-------------------------+--------------+---------------+
+//! +-------------------------+--------------+-----------------------+
+//! |       Management        |       Typed      |      Untyped      |
+//! +-------------------------+------------------+-------------------+
+//! | Interpreter-independent | [`Py<T>`]        | [`PyObject`]      |
+//! | Reference-counted       | [`PyRef<T>`]     | [`PyObjectRef`]   |
+//! | Weak                    | [`PyWeakRef<T>`] | [`PyRef<PyWeak>`] |
+//! +-------------------------+--------------+-----------------------+
 //!
-//! PyRef<PyWeak> may looking like to be called as PyObjectWeak by the rule,
+//! [`PyRef<PyWeak>`] may looking like to be called as PyObjectWeak by the rule,
 //! but not to do to remember it is a PyRef object.
 use super::{
     PyAtomicRef,
@@ -207,7 +207,7 @@ impl WeakRefList {
             hash: Radium::new(crate::common::hash::SENTINEL),
         };
         let weak = PyRef::new_ref(obj, cls, dict);
-        // SAFETY: we don't actually own the PyObjectWeaks inside `list`, and every time we take
+        // SAFETY: we don't actually own the PyObjectWeak's inside `list`, and every time we take
         // one out of the list we immediately wrap it in ManuallyDrop or forget it
         inner.list.push_front(unsafe { ptr::read(&weak) });
         inner.ref_count += 1;
@@ -370,11 +370,11 @@ impl PyWeak {
         let dealloc = {
             let mut guard = unsafe { self.parent.as_ref().lock() };
             let offset = std::mem::offset_of!(PyInner<PyWeak>, payload);
-            let pyinner = (self as *const Self)
+            let py_inner = (self as *const Self)
                 .cast::<u8>()
                 .wrapping_sub(offset)
                 .cast::<PyInner<Self>>();
-            let node_ptr = unsafe { NonNull::new_unchecked(pyinner as *mut Py<Self>) };
+            let node_ptr = unsafe { NonNull::new_unchecked(py_inner as *mut Py<Self>) };
             // the list doesn't have ownership over its PyRef<PyWeak>! we're being dropped
             // right now so that should be obvious!!
             std::mem::forget(unsafe { guard.list.remove(node_ptr) });
@@ -1301,6 +1301,7 @@ mod tests {
 
     #[test]
     fn miri_test_drop() {
+        //cspell:ignore dfghjkl
         let ctx = crate::Context::genesis();
         let obj = ctx.new_bytes(b"dfghjkl".to_vec());
         drop(obj);

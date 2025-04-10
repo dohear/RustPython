@@ -1,3 +1,5 @@
+// cspell:ignore abday abmon yesexpr noexpr CRNCYSTR RADIXCHAR AMPM THOUSEP
+
 pub(crate) use _locale::make_module;
 
 #[cfg(windows)]

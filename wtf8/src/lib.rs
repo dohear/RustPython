@@ -19,10 +19,10 @@
 //!
 //! We use WTF-8 over something more similar to CPython's string implementation
 //! because of its compatibility with UTF-8, meaning that in the case where a
-//! string has no surrogates, it can be viewed as a UTF-8 Rust [`str`] without
+//! string has no surrogates, it can be viewed as a UTF-8 Rust [`prim@str`] without
 //! needing any copies or re-encoding.
 //!
-//! This implementation is mostly copied from the WTF-8 implentation in the
+//! This implementation is mostly copied from the WTF-8 implementation in the
 //! Rust 1.85 standard library, which is used as the backing for [`OsStr`] on
 //! Windows targets. As previously mentioned, however, it is modified to not
 //! join two surrogates into one codepoint when concatenating strings, in order
@@ -463,8 +463,8 @@ impl Wtf8Buf {
 
     pub fn pop(&mut self) -> Option<CodePoint> {
         let ch = self.code_points().next_back()?;
-        let newlen = self.len() - ch.len_wtf8();
-        self.bytes.truncate(newlen);
+        let new_len = self.len() - ch.len_wtf8();
+        self.bytes.truncate(new_len);
         Some(ch)
     }
 

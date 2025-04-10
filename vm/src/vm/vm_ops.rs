@@ -152,9 +152,9 @@ impl VirtualMachine {
     /// Calling scheme used for binary operations:
     ///
     /// Order operations are tried until either a valid result or error:
-    ///   b.rop(b,a)[*], a.op(a,b), b.rop(b,a)
+    ///   `b.rop(b,a)[*], a.op(a,b), b.rop(b,a)`
     ///
-    /// [*] only when Py_TYPE(a) != Py_TYPE(b) && Py_TYPE(b) is a subclass of Py_TYPE(a)
+    /// `[*]` - only when Py_TYPE(a) != Py_TYPE(b) && Py_TYPE(b) is a subclass of Py_TYPE(a)
     pub fn binary_op1(&self, a: &PyObject, b: &PyObject, op_slot: PyNumberBinaryOp) -> PyResult {
         let class_a = a.class();
         let class_b = b.class();
@@ -206,7 +206,7 @@ impl VirtualMachine {
         if !result.is(&self.ctx.not_implemented) {
             return Ok(result);
         }
-        Err(self.new_unsupported_binop_error(a, b, op))
+        Err(self.new_unsupported_bin_op_error(a, b, op))
     }
 
     /// Binary in-place operators
@@ -250,7 +250,7 @@ impl VirtualMachine {
         if !result.is(&self.ctx.not_implemented) {
             return Ok(result);
         }
-        Err(self.new_unsupported_binop_error(a, b, op))
+        Err(self.new_unsupported_bin_op_error(a, b, op))
     }
 
     fn ternary_op(
@@ -384,7 +384,7 @@ impl VirtualMachine {
                 return Ok(result);
             }
         }
-        Err(self.new_unsupported_binop_error(a, b, "+"))
+        Err(self.new_unsupported_bin_op_error(a, b, "+"))
     }
 
     pub fn _iadd(&self, a: &PyObject, b: &PyObject) -> PyResult {
@@ -398,7 +398,7 @@ impl VirtualMachine {
                 return Ok(result);
             }
         }
-        Err(self.new_unsupported_binop_error(a, b, "+="))
+        Err(self.new_unsupported_bin_op_error(a, b, "+="))
     }
 
     pub fn _mul(&self, a: &PyObject, b: &PyObject) -> PyResult {
@@ -419,7 +419,7 @@ impl VirtualMachine {
                 })?;
             return seq_b.repeat(n, self);
         }
-        Err(self.new_unsupported_binop_error(a, b, "*"))
+        Err(self.new_unsupported_bin_op_error(a, b, "*"))
     }
 
     pub fn _imul(&self, a: &PyObject, b: &PyObject) -> PyResult {
@@ -448,7 +448,7 @@ impl VirtualMachine {
              * used. */
             return seq_b.repeat(n, self);
         }
-        Err(self.new_unsupported_binop_error(a, b, "*="))
+        Err(self.new_unsupported_bin_op_error(a, b, "*="))
     }
 
     pub fn _abs(&self, a: &PyObject) -> PyResult<PyObjectRef> {

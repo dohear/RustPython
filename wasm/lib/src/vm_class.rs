@@ -86,7 +86,9 @@ pub fn add_init_func(f: fn(&mut VirtualMachine)) {
 // https://rustwasm.github.io/2018/10/24/multithreading-rust-and-wasm.html#atomic-instructions
 thread_local! {
     static STORED_VMS: RefCell<HashMap<String, Rc<StoredVirtualMachine>>> = RefCell::default();
-    static VM_INIT_FUNCS: RefCell<Vec<fn(&mut VirtualMachine)>> = RefCell::default();
+    static VM_INIT_FUNCS: RefCell<Vec<fn(&mut VirtualMachine)>> = const {
+        RefCell::new(Vec::new())
+    };
 }
 
 pub fn get_vm_id(vm: &VirtualMachine) -> &str {
@@ -340,7 +342,7 @@ impl WASMVirtualMachine {
             let code = vm.compile(source, mode, source_path);
             let code = code.map_err(convert::syntax_err)?;
             let result = vm.run_code_obj(code, scope.clone());
-            convert::pyresult_to_jsresult(vm, result)
+            convert::pyresult_to_js_result(vm, result)
         })?
     }
 
