@@ -16,9 +16,10 @@ pythons = [
 
 # Benchmark scripts:
 benchmarks = [
-    ['benchmarks/nbody.py'],
-    ['benchmarks/mandelbrot.py'],
-    ['benchmarks/strings.py'],
+    ['microbenchmarks/t.py'],
+    #['benchmarks/nbody.py'],
+    #['benchmarks/mandelbrot.py'],
+    #['benchmarks/strings.py'],
 ]
 
 exe_ids = ['cpython', 'rustpython']

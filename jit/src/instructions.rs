@@ -152,6 +152,82 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             .or_insert_with(|| builder.create_block())
     }
 
+    // Helper that tries to optimize a peephole window starting at index `start`.
+    // If a pattern matches, it applies the transformation and returns Some(new_index),
+    // otherwise returns None.
+    fn optimize_peephole<C: bytecode::Constant>(
+        &mut self,
+        func_ref: FuncRef,
+        bytecode: &CodeObject<C>,
+        arg_state: &mut OpArgState,
+        instructions: &[bytecode::CodeUnit],
+        label_targets: &std::collections::BTreeSet<Label>,
+        start: usize,
+    ) -> Option<usize> {
+        // --- a-(-b) ---
+        if start + 3 < instructions.len()
+            && !label_targets.contains(&Label((start + 1) as u32))
+            && !label_targets.contains(&Label((start + 2) as u32))
+            && !label_targets.contains(&Label((start + 3) as u32))
+        {
+            let (instr0, arg0) = arg_state.get(instructions[start]);
+            let (instr1, arg1) = arg_state.get(instructions[start + 1]);
+            let (instr2, arg2) = arg_state.get(instructions[start + 2]);
+            let (instr3, arg3) = arg_state.get(instructions[start + 3]);
+
+            if let (
+                Instruction::LoadConst { .. } | Instruction::LoadFast(_),
+                Instruction::LoadConst { .. } | Instruction::LoadFast(_),
+                Instruction::UnaryOperation { op: ref op_unary },
+                Instruction::BinaryOperation { op: ref op_binary },
+            ) = (instr0, instr1, instr2, instr3)
+            {
+                if op_unary.get(arg2) == rustpython_compiler_core::bytecode::UnaryOperator::Minus
+                    && op_binary.get(arg3)
+                        == rustpython_compiler_core::bytecode::BinaryOperator::Subtract
+                {
+                    println!(
+                        "Optimizing peephole pattern: {:?} {:?} | {:?} {:?}",
+                        instr0, arg0, instr1, arg1
+                    );
+                    // Process the first two instructions normally.
+                    self.add_instruction(func_ref, bytecode, instr0, arg0)
+                        .ok()?;
+                    self.add_instruction(func_ref, bytecode, instr1, arg1)
+                        .ok()?;
+                    // Instead of emitting the UnaryOperation and subtraction, perform optimized addition.
+                    let b_val = self.stack.pop().ok_or(JitCompileError::BadBytecode).ok()?;
+                    let a_val = self.stack.pop().ok_or(JitCompileError::BadBytecode).ok()?;
+                    let result = match (a_val, b_val) {
+                        (JitValue::Int(a), JitValue::Int(b)) => {
+                            let (out, carry) = self.builder.ins().sadd_overflow(a, b);
+                            self.builder.ins().trapnz(carry, TrapCode::INTEGER_OVERFLOW);
+                            JitValue::Int(out)
+                        }
+                        (JitValue::Float(a), JitValue::Float(b)) => {
+                            JitValue::Float(self.builder.ins().fadd(a, b))
+                        }
+                        (JitValue::Int(a), JitValue::Float(b)) => {
+                            let a_float = self.builder.ins().fcvt_from_sint(types::F64, a);
+                            JitValue::Float(self.builder.ins().fadd(a_float, b))
+                        }
+                        (JitValue::Float(a), JitValue::Int(b)) => {
+                            let b_float = self.builder.ins().fcvt_from_sint(types::F64, b);
+                            JitValue::Float(self.builder.ins().fadd(a, b_float))
+                        }
+                        _ => return None,
+                    };
+                    self.stack.push(result);
+                    return Some(start + 4);
+                }
+            }
+        }
+
+        // If no peephole optimization was applied, return None.
+        None
+    }
+
+    /// Main compile loop.
     pub fn compile<C: bytecode::Constant>(
         &mut self,
         func_ref: FuncRef,
@@ -159,53 +235,54 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     ) -> Result<(), JitCompileError> {
         let label_targets = bytecode.label_targets();
         let mut arg_state = OpArgState::default();
-
-        // Track whether we have "returned" in the current block
+        let instructions = &bytecode.instructions;
         let mut in_unreachable_code = false;
-
-        for (offset, &raw_instr) in bytecode.instructions.iter().enumerate() {
-            let label = Label(offset as u32);
-            let (instruction, arg) = arg_state.get(raw_instr);
-
-            // If this is a label that some earlier jump can target,
-            // treat it as the start of a new reachable block:
+        let mut i = 0;
+        while i < instructions.len() {
+            let label = Label(i as u32);
+            // If this offset is a jump target, start a new block.
             if label_targets.contains(&label) {
-                // Create or get the block for this label:
                 let target_block = self.get_or_create_block(label);
-
-                // If the current block isn't terminated, jump:
                 if let Some(cur) = self.builder.current_block() {
                     if cur != target_block && self.builder.func.layout.last_inst(cur).is_none() {
                         self.builder.ins().jump(target_block, &[]);
                     }
                 }
-                // Switch to the target block
                 if self.builder.current_block() != Some(target_block) {
                     self.builder.switch_to_block(target_block);
                 }
-
-                // We are definitely reachable again at this label
                 in_unreachable_code = false;
             }
 
-            // If we're in unreachable code, skip this instruction unless the label re-entered above.
             if in_unreachable_code {
+                i += 1;
                 continue;
             }
 
-            // Actually compile this instruction:
-            self.add_instruction(func_ref, bytecode, instruction, arg)?;
-
-            // If that was a return instruction, mark future instructions unreachable
-            match instruction {
-                Instruction::ReturnValue | Instruction::ReturnConst { .. } => {
-                    in_unreachable_code = true;
-                }
-                _ => {}
+            // Try to optimize using the peephole helper.
+            if let Some(new_index) = self.optimize_peephole(
+                func_ref,
+                bytecode,
+                &mut arg_state,
+                instructions,
+                &label_targets,
+                i,
+            ) {
+                i = new_index;
+                continue;
             }
+
+            // Otherwise, compile the instruction normally.
+            let (instruction, arg) = arg_state.get(instructions[i]);
+            println!("New Instructions: {:?} {:?}", instruction, arg);
+            self.add_instruction(func_ref, bytecode, instruction, arg)?;
+            if let Instruction::ReturnValue | Instruction::ReturnConst { .. } = instruction {
+                in_unreachable_code = true;
+            }
+            i += 1;
         }
 
-        // After processing, if the current block is unterminated, insert a trap or fallthrough
+        // If the current block is unterminated, insert a trap.
         if let Some(cur) = self.builder.current_block() {
             if self.builder.func.layout.last_inst(cur).is_none() {
                 self.builder.ins().trap(TrapCode::user(0).unwrap());
