@@ -231,8 +231,24 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         idx: bytecode::NameIdx,
         val: JitValue,
     ) -> Result<(), JitCompileError> {
+
+        if val.to_jit_type().is_none() {
+            // Create a dummy integer value to use as a placeholder in the Cranelift code
+            let dummy_val = self.builder.ins().iconst(types::I64, 0);
+            
+            // for more robust code we will need  Store the JIT value in some separate data structure 
+            // so we can reference it but we don't(Shouldn't) need to do anything here for the simple case
+            
+            // For debugging, print what we're storing
+            println!("Storing non-primitive value in variable {}: {:?}", idx, val);
+            
+            return Ok(());
+        }
+
         let builder = &mut self.builder;
-        let ty = val.to_jit_type().ok_or(JitCompileError::NotSupported)?;
+        println!("Maybe??");
+        let ty = val.to_jit_type().ok_or(JitCompileError::NotSupported)?; // Getting an error when we call val.to_jit_type()
+        println!("Maybe???");
         let local = self.variables[idx as usize].get_or_insert_with(|| {
             let var = Variable::new(idx as usize);
             let local = Local {
@@ -453,6 +469,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 Ok(())
             }
             Instruction::LoadFast(idx) => {
+                println!("Hello ");
                 let local = self.variables[idx.get(arg) as usize]
                     .as_ref()
                     .ok_or(JitCompileError::BadBytecode)?;
@@ -464,6 +481,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             Instruction::StoreFast(idx) => {
                 let val = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                println!("Here???");
                 self.store_variable(idx.get(arg), val)
             }
             Instruction::LoadConst { idx } => {
@@ -824,7 +842,8 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 let args = self.pop_multiple(nargs_value);
                 
                 // Get the function itself
-                let func = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                println!("In Call Functional");
+                let func = self.stack.pop().ok_or(JitCompileError::BadBytecode)?; 
                 
                 match func {
                     JitValue::BuildClassFunc => {
